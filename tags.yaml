@@ -10,18 +10,31 @@
 # into node names, so the same tag list applies to every unit.
 #
 # Access: R = client may read, RW = client may read and write.
-# The DCS is the only client allowed to write PID.SP. The HMI writes
-# APC.Enabled and, in manual mode, PID.SP for the unit under test.
+# The DCS is the only client allowed to write PID.SP and Level.SP. The HMI
+# writes APC.Enabled and, in manual mode, PID.SP for the unit under test.
+#
+# PID.SP is a FLOW setpoint (cm3/s), not a level setpoint: the PLC's local
+# "PID" stage is a static, no-feedback flow-to-Pump.CMD conversion (there
+# is no flow sensor in the real rig either, just a calibration curve), so
+# there is nothing for a closed level loop to chase locally. The DCS's MPC
+# already computes an optimal flow every solve (that is what it optimizes
+# for); writing that number straight through, instead of translating it
+# into a level point first, is both simpler and avoids the level<->flow
+# translation this project's earlier design needed and had to tune
+# empirically to keep stable (see OPEN_QUESTIONS.md). Level.SP is where
+# the DCS's actual level target lives instead (see that tag below).
 
 unit:
   description: >
     One process unit: a pump-fed upstream tank draining by gravity into a
-    downstream tank, which drains by gravity to the sump, plus a local PID.
-    Matches the original Vodarna rig's physics exactly (see
-    reference/water_mpc/). There is no valve anywhere in the real rig, one
-    actuator only (the pump) and two fixed gravity orifices; earlier
-    versions of this contract had Pump+Valve on a single tank, which did
-    not match the rig this project is modeling and has been removed.
+    downstream tank, which drains by gravity to the sump, plus a local
+    flow-to-command conversion (see the PID.SP note above -- "PID" here is
+    a naming holdover, not a closed loop). Matches the original Vodarna
+    rig's physics exactly (see reference/water_mpc/). There is no valve
+    anywhere in the real rig, one actuator only (the pump) and two fixed
+    gravity orifices; earlier versions of this contract had Pump+Valve on
+    a single tank, which did not match the rig this project is modeling
+    and has been removed.
   tags:
     Level.PV:
       type: float
@@ -37,8 +50,14 @@ unit:
     Level.SP:
       type: float
       unit: m
-      access: R
-      description: Effective level setpoint currently used by the PID (local or cascade).
+      access: RW
+      description: >
+        The level the DCS/APC is currently trying to reach (the active
+        cycle's current value, or the manual constant), written by the
+        DCS every control cycle. Not part of the control loop itself
+        (that operates on flow, see PID.SP) -- purely the target for the
+        HMI/operator to compare against Level.PV. The PLC neither
+        computes nor writes this tag.
     Level.HH:
       type: float
       unit: m
@@ -67,25 +86,31 @@ unit:
 
     PID.SP:
       type: float
-      unit: m
+      unit: cm3/s
       access: RW
       description: >
-        Cascade setpoint written by the DCS. The PLC only follows this value
-        in CASCADE mode. Written exclusively by the DCS/APC layer, never by
-        the HMI directly except when forcing a unit into MANUAL/local test.
+        Cascade flow setpoint written by the DCS (the MPC's own optimal
+        flow output, see the top-of-file note). The PLC converts this
+        directly to Pump.CMD via a fixed calibration curve in CASCADE
+        mode, no closed loop. Written exclusively by the DCS/APC layer,
+        never by the HMI directly except when forcing a unit into
+        MANUAL/local test (where it means a direct flow override, not a
+        level).
     PID.OUT:
       type: float
       unit: percent
       access: R
-      description: PID controller output before actuator limits.
+      description: Commanded flow-to-percent output before the interlock zeroes it.
     PID.Mode:
       type: string
       access: R
       enum: [AUTO, MAN, CASCADE]
       description: >
-        AUTO = PID follows its local setpoint. MAN = operator drives Pump.CMD
-        directly. CASCADE = PID follows PID.SP from the DCS. The PLC itself
-        demotes CASCADE to AUTO on a stale PID.SP watchdog trip.
+        AUTO = fail-safe, flow forced to 0. MAN = operator drives Pump.CMD
+        directly. CASCADE = Pump.CMD follows PID.SP (a flow command) from
+        the DCS. The PLC itself demotes CASCADE to AUTO (flow -> 0) on a
+        stale PID.SP watchdog trip -- the safe default on a lost cascade
+        is no flow, not holding the last commanded value.
 
     Interlock.Trip:
       type: bool

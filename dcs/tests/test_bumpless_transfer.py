@@ -1,20 +1,16 @@
-"""Bumpless transfer: when APC.Enabled transitions to true, the first PID.SP
-the DCS writes must move along the MPC's own dynamically-consistent plan
-computed from the current measurement, not snap to an unrelated value or
-straight to the far-away target. This is what reset_to_measurement() is
-for: it seeds the EKF/MPC's internal state at the real plant measurement
-before the first solve.
+"""Bumpless transfer: when a unit starts being solved again (re-enabled,
+or its EKF/MPC state gets reseeded via reset_to_measurement()), the very
+next flow command must be a physically sane response to the *current*
+measurement and target, not a discontinuity inherited from whatever the
+controller's internal state happened to be before the reset.
 
-"Bumpless" does not mean "stays pinned near the measurement" -- with
-PREDICTION_HORIZON_INDEX set deep enough into the solve horizon for the
-local PID to have real corrective authority (see
-dcs/controller_wrapper.py's comment on that constant, and
-OPEN_QUESTIONS.md for the closed-loop instability a too-shallow index
-causes), a real first step is expected to already carry meaningful
-separation from the measurement when the target is far away. What must
-NOT happen is a jump inconsistent with the model's own physics (e.g. to a
-value near the target or outside the model's valid envelope) merely
-because the estimator was just reset.
+PID.SP is a flow (cm3/s), not a level: "bumpless" no longer means "stays
+near the current level" (a flow and a level are not the same kind of
+quantity, so there is nothing to compare a flow jump against in level
+terms). It means the flow command respects the actuator's physical bounds
+and points the right direction for the actual gap between measurement and
+target -- inflow when below target, near-zero when at or above it (the
+model has no active way to drain faster, only gravity outflow).
 """
 from __future__ import annotations
 
@@ -24,14 +20,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from dcs.controller_wrapper import UnitController
+from reference.water_mpc.mpc_core import U_MAX, U_MIN
 
 TARGET_LEVEL_M = 0.15
-MAX_FIRST_STEP_JUMP_M = 0.05  # generous bound: real, but not a snap to the target
 
 
-def test_first_sp_after_enable_is_close_to_measurement():
+def test_first_flow_after_reset_is_bounded_and_points_up_when_below_target():
     controller = UnitController(unit_id=1)
-    measured_level_m = 0.05
+    measured_level_m = 0.05  # well below target
 
     controller.request_bumpless_reset()
     result = controller.step(
@@ -42,35 +38,35 @@ def test_first_sp_after_enable_is_close_to_measurement():
     )
 
     assert result.converged
-    jump = abs(result.sp_m - measured_level_m)
-    assert jump < MAX_FIRST_STEP_JUMP_M, (
-        f"first PID.SP after enable jumped {jump:.4f} m from the measurement, "
-        f"expected < {MAX_FIRST_STEP_JUMP_M} m for bumpless transfer"
-    )
+    assert U_MIN - 1e-9 <= result.sp_flow_cm3s <= U_MAX + 1e-9
+    # Below target: the model has no active drain, so making progress
+    # requires some positive inflow.
+    assert result.sp_flow_cm3s > 0.0
 
 
-def test_bumpless_reset_reseeds_after_disable_reenable_at_different_level():
-    """Simulates: APC runs for a while, gets disabled, the plant drifts to a
-    different level under local PID, then APC is re-enabled. The next SP
-    must track the new measurement, not whatever the controller's internal
-    state was left at.
+def test_reset_reseeds_after_disable_reenable_at_a_different_level():
+    """Simulates: APC runs for a while, gets disabled, the plant drifts to
+    a different level under local control, then APC is re-enabled. The
+    next flow command must be a sane response to the *new* measurement,
+    not whatever the controller's internal state was left at.
     """
     controller = UnitController(unit_id=1)
 
     controller.request_bumpless_reset()
     level_m = 0.05
     for _ in range(20):
-        result = controller.step(TARGET_LEVEL_M, level_m, 9.0, 0.5)
-        level_m = result.sp_m  # pretend the PID tracks the SP exactly
+        controller.step(TARGET_LEVEL_M, level_m, 9.0, 0.5)
+        # A real plant does not track flow instantaneously; nudge the
+        # simulated level slightly toward target so there is somewhere
+        # for the loop below to reset away from.
+        level_m = min(TARGET_LEVEL_M, level_m + 0.002)
 
-    # APC disabled here; plant drifts under local control to a new level.
+    # APC disabled here; plant drifts under local control to a level far
+    # below both the target and wherever the loop above left off.
     drifted_level_m = 0.02
     controller.request_bumpless_reset()
     result = controller.step(TARGET_LEVEL_M, drifted_level_m, 9.0, 0.5)
 
     assert result.converged
-    jump = abs(result.sp_m - drifted_level_m)
-    assert jump < MAX_FIRST_STEP_JUMP_M, (
-        f"first PID.SP after re-enable jumped {jump:.4f} m from the drifted "
-        f"measurement, expected < {MAX_FIRST_STEP_JUMP_M} m"
-    )
+    assert U_MIN - 1e-9 <= result.sp_flow_cm3s <= U_MAX + 1e-9
+    assert result.sp_flow_cm3s > 0.0  # still below target, still needs inflow

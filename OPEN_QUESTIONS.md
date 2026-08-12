@@ -214,7 +214,16 @@ an `h1` tag there would misrepresent the physical system. Instead
 rather than routed through `plantbus`/tags.yaml. The HMI reads it purely
 for display.
 
-## dcs/: closed-loop instability from PREDICTION_HORIZON_INDEX=1 (fixed)
+## dcs/: closed-loop instability from PREDICTION_HORIZON_INDEX=1 (fixed, superseded)
+
+**Superseded 2026-08-12**: the mechanism this entry fixes (extracting a
+point from the MPC's predicted *level* trajectory to use as `PID.SP`,
+tuned via `PREDICTION_HORIZON_INDEX`) no longer exists. `PID.SP` is now
+the MPC's optimal *flow* output (`MPCResult.flow_cm3s`) written directly,
+and the local level-tracking PID it used to feed is deleted entirely (see
+"PID.SP becomes a flow setpoint, not a level setpoint" below). Kept here
+as a historical record of a real bug and how it was diagnosed, not as a
+description of current behavior.
 
 Found during live end-to-end testing of the two-tank rework: running the
 full real stack (real `plc.unit` x3 + real `dcs.main`, APC enabled) for
@@ -359,7 +368,16 @@ cramped regardless of available space. Fixed by switching to CSS
 `height: auto`, and dropping `preserveAspectRatio="none"` so the SVG
 scales uniformly with its container instead of stretching.
 
-## dcs/: units reconnecting mid-session collapsed to the LL interlock (fixed)
+## dcs/: units reconnecting mid-session collapsed to the LL interlock (fixed, partially superseded)
+
+**Partially superseded 2026-08-12**: the fix itself (`UnitRuntime.was_alive`
+tracking + `request_bumpless_reset()` on reconnect, in `dcs/main.py`) is
+still exactly right and unchanged -- reconnect-triggered EKF/MPC state
+staleness is a real problem independent of what `PID.SP` represents. But
+the *comparison* this entry draws to the `PREDICTION_HORIZON_INDEX=1` bug
+below no longer applies now that that bug's mechanism is gone (see the
+superseded note there); this entry stands on its own as a distinct,
+still-relevant fix.
 
 Found live: killing and restarting one PLC unit's process mid-session (the
 exact scenario `demos/demo_b_lost_unit.py` exercises, and what happens if
@@ -412,3 +430,105 @@ snapshot is applied in one rebuild. While the operator is actively using
 any control in the panel, nothing underneath it moves; this is a
 deliberate tradeoff (a still panel while you're using it beats a panel
 that fights your click), not an oversight.
+
+## reference/water_mpc/: unbounded e_int windup destabilized long sessions (fixed, found while verifying the flow redesign above)
+
+Found while verifying the flow-setpoint redesign above: `test_mpc_bounds.py`
+intermittently failed a check that the plant makes real progress toward a
+target over a 300-cycle run. Isolated with a direct `UnitController` +
+`TankModel` script (no OPC UA) at a realistic step size (5cm -> 10cm,
+matching `Step_Cycle.csv`): the controller reached the target cleanly by
+t=75s, then between t=150s and t=250s drifted back down to ~5-6cm with the
+commanded flow oscillating chaotically between 0 and `U_MAX`, despite
+already having converged.
+
+Root-caused by inspection and two isolated experiments (both in
+`WaterTankController.step()`, `reference/water_mpc/mpc_core.py`):
+warm-starting the solver instead of calling `set_initial_guess()` fresh
+every cycle did *not* fix it; clamping the EKF's `e_int` state to a small
+range after every `step()` did, fully, holding the target rock-solid for
+250+ seconds. `e_int` has zero objective weight (`Q_INT = 0.0` in
+`build_mpc()`) and its own model-level anti-windup (the `aw_factor` gating
+in `build_model()`) only slows growth while `q0` is near `U_MIN`/`U_MAX` --
+it does nothing once the loop is comfortably mid-range, so a small
+persistent residual lets `e_int` grow without bound over a long session,
+well past its own `+-1000` model bound (`mpc.bounds[...,'e_int']` in
+`build_mpc()`), which the original short, GUI-driven sessions this was
+ported from never exercised long enough to hit. Once `e_int` reaches the
+hundreds, its magnitude in `x_hat` (fed back as `mpc.x0` every solve)
+numerically destabilizes ipopt's tightly-budgeted solve (`max_iter=15`,
+`max_cpu_time=0.3s`) into chaotic bang-bang `q0`, despite having no bearing
+on the objective itself.
+
+This was invisible before the flow redesign above: the old
+level-trajectory-extraction approach only ever read a single predicted
+point 25 steps into the horizon, then fed that through a slow local PID,
+which happened to damp out this raw chaotic solver noise before it ever
+reached the actuator. Writing `flow_cm3s` straight through, which is the
+right design (see the redesign entry above), removed that accidental
+damping and exposed this real, separate bug.
+
+Fixed by clamping `self.x_hat`'s `e_int` component to `[-20, 20]`
+immediately after the EKF update in `step()`, before it is used as the
+next solve's `x0`. This does touch `reference/water_mpc/mpc_core.py`,
+otherwise treated as a frozen port -- confirmed acceptable since it changes
+neither the model, the objective, nor the constraints, only adds a numeric
+safety clamp on an estimator state that the objective never weights
+anyway (the same category of change as the pre-existing do-mpc-5.1.1
+compat fix in `dcs/controller_wrapper.py`'s `_PortedWaterTankController.__init__`).
+Verified: `dcs/tests/test_mpc_bounds.py` passes reliably across repeated
+runs post-fix (previously intermittent), and the live 3-unit smoke test
+held stable tracking on all three units for 90+ seconds with no collapse.
+
+## dcs/plc/: PID.SP becomes a flow setpoint, not a level setpoint (2026-08-12)
+
+`PID.SP` used to be a *level* target (m): `dcs/controller_wrapper.py`
+extracted one point (`PREDICTION_HORIZON_INDEX=25`) from the MPC's
+predicted level trajectory and wrote that, which `plc/pid.py` (a
+closed-loop, tuned-gain PID) then chased to produce `Pump.CMD`. This was
+flagged as a design mistake, not just a style preference: the MPC already
+computes an optimal *flow* every solve (`MPCResult.flow_cm3s`, cm3/s --
+literally what it optimizes for, ported unchanged from
+`reference/water_mpc/mpc_core.py`), and the level-trajectory extraction
+was discarding that number and reconstructing an awkward proxy for it
+instead. That reconstruction is *why* `PREDICTION_HORIZON_INDEX` needed
+empirical tuning at all (see the superseded entry above), and it was
+fragile in a deeper way: the real flow actually applied to the plant
+(whatever the local PID's gains happened to produce for a given level
+error) was never exactly equal to what the MPC's EKF assumed was applied
+(`u_next=u_val_cm3s` inside `mpc_core.py`'s `step()`), so the internal
+state estimate could drift from reality over a long run. That mismatch
+was the root cause of two separate collapse-to-LL bugs chased down this
+session (both entries above) -- fixing the extraction index and the
+reconnect-reset gap treated the symptoms, not this underlying cause.
+
+Writing `flow_cm3s` straight through as `PID.SP` closes that gap by
+construction: `plc/`'s conversion from a flow `PID.SP` to `Pump.CMD` is
+now an exact, known linear map (`pump_max_flow_cm3s * (Pump.CMD / 100)`,
+see `plc/model.py`), so the flow actually applied to the plant becomes
+exactly what the MPC commanded (net of one control-cycle's transport
+delay) -- matching the EKF's own assumption by construction instead of by
+tuning a proxy to approximate it well enough. It also deletes
+`PREDICTION_HORIZON_INDEX` and the local PID's gain-tuning fragility
+entirely, since neither exists anymore (`plc/pid.py` is deleted).
+
+On cascade failure (stale `PID.SP` in CASCADE, `SP_STALE_TIMEOUT_S=30s`),
+the fallback changed from "hold the last known setpoint" to "flow forced
+to 0, unconditionally" -- a real fail-safe, matching how a flow command
+with no fresh instruction behind it should behave, rather than an
+operator-configurable `UNIT_LOCAL_SP` level fallback (removed).
+
+`Level.SP` (tags.yaml) changed from PLC-computed/read-only to
+DCS-written/RW, holding the DCS's actual real level target
+(`UnitRuntime.nominal_target_m()` in `dcs/main.py` -- the active cycle's
+current value, or the manual constant) written directly, not a derived
+quantity. An earlier design for this session computed `Level.SP` as a
+Torricelli-derived "implied steady-state level for the current commanded
+flow" instead; that was rejected during review as a different design
+mistake in the same family as the one above -- it produces a number that
+*looks* like a setpoint (same unit, same tag name) but means something
+else ("where this would eventually settle if nothing changed" rather than
+"what the APC is actually trying to reach"), which would have misled
+anyone reading the HMI's target-vs-actual trend line. The DCS already has
+the real target on hand every cycle; writing it directly is simpler and
+more honest than deriving a related-but-different proxy.

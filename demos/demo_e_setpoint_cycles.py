@@ -14,9 +14,12 @@ Runtime note: both example cycles have a 4 minute period (step_response.csv:
 flat at 5 cm for 2 min, step to 10 cm for ~1 min, back to 5 cm; ramp_response.csv:
 0 cm -> 15 cm over 2 min, back down over the next 2 min), so this script's
 default RUN_S=300s (5 minutes) comfortably covers a full period of both,
-including the step transition around t=2min and the anticipatory PID.SP
-rise the MPC starts well before that (its horizon is 40s, so watch it lead
-the step by about that much). Raise RUN_S to watch more than one period,
+including the step transition around t=2min and the anticipatory flow
+rise the MPC starts commanding (via PID.SP, cm3/s) well before that (its
+horizon is 40s, so watch it lead the step by about that much) -- `Level.SP`
+itself still steps instantly, since it holds the DCS's actual instantaneous
+target; it's the commanded flow that ramps in early. Raise RUN_S to watch
+more than one period,
 or set TIME_SCALE below 1.0's default to change the physical plant's own
 settling speed -- but note that speeding the plant up more than the cycle
 relative to real time makes MPC's lookahead advantage less visible, since
@@ -115,12 +118,14 @@ def main():
                 print(f"[demo_e] t={elapsed:6.1f}s  not ready yet ({exc})")
             time.sleep(POLL_PERIOD_S)
 
-        print("[demo_e] done. Expected: Unit1's PID.SP starts near 0.05 m and rises")
-        print("[demo_e] toward 0.10 m well before t=120s (the step), because the MPC")
-        print("[demo_e] previewed it across its ~40s solve horizon (see")
-        print("[demo_e] reference/water_mpc/mpc_core.py's set_cycle) ahead of a plain")
-        print("[demo_e] reactive controller. Unit2's SP should move smoothly along the")
-        print("[demo_e] 0->0.15m->0 ramp. Unit3's SP should hold its manual target.")
+        print("[demo_e] done. Expected: Unit1's PID.SP (a flow, cm3/s) starts rising")
+        print("[demo_e] well before t=120s (the step in Level.SP from 0.05 to 0.10 m),")
+        print("[demo_e] because the MPC previewed the step across its ~40s solve")
+        print("[demo_e] horizon (see reference/water_mpc/mpc_core.py's set_cycle) ahead")
+        print("[demo_e] of a plain reactive controller. Unit2's Level.SP should move")
+        print("[demo_e] smoothly along the 0->0.15m->0 ramp, with PID.SP tracking the")
+        print("[demo_e] flow needed to follow it. Unit3's Level.SP should hold its")
+        print("[demo_e] manual target.")
     finally:
         dcs_proc.terminate()
         for p in plc_procs.values():

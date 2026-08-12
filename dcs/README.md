@@ -1,8 +1,12 @@
 # dcs/ — supervisory APC layer
 
-Writes only `Unit*.PID.SP` (a level target in meters) into the PLC's local
-PID loops. Never writes `Pump.CMD`. Cascade:
-`MPC (dcs/) -> PID.SP -> PLC PID loop -> Pump.CMD -> pump`.
+Writes only `Unit*.PID.SP` (a **flow** setpoint, cm3/s) into the PLC.
+Never writes `Pump.CMD`. Cascade:
+`MPC (dcs/) -> PID.SP (flow) -> PLC flow-to-command conversion -> Pump.CMD -> pump`.
+Also writes `Unit*.Level.SP`, the DCS's actual level target -- not part of
+the control loop, purely so the HMI/operator can compare it against
+`Level.PV`. See "Mapping from the MPC to PID.SP" below for why the loop
+runs on flow, not level.
 
 ## OPC UA topology
 
@@ -11,7 +15,8 @@ PID loops. Never writes `Pump.CMD`. Cascade:
    dcs/  ------------------------------------->      tools/fake_plc.py)
  (client)         reads: Level.PV, Status.Heartbeat (subscribed),
                           full unit tag set (periodic, for the historian)
-                  writes: PID.SP only
+                  writes: PID.SP (flow, cm3/s), Level.SP (the DCS's own
+                          level target, not part of the control loop)
 
                  opc.tcp://0.0.0.0:4900/            (dcs/'s own server)
    hmi/  ------------------------------------->      dcs/
@@ -40,40 +45,39 @@ PID loops. Never writes `Pump.CMD`. Cascade:
 ## Mapping from the MPC to PID.SP
 
 `reference/water_mpc/mpc_core.py`'s `WaterTankController.step()` returns
-`MPCResult.flow_cm3s`, a flow-actuator command. That value is **not used at
-all** by `dcs/`: writing it anywhere would break the cascade rule.
+`MPCResult.flow_cm3s` -- literally what the MPC optimizes for every
+solve. `dcs/controller_wrapper.py`'s `UnitController.step()` writes that
+number straight through as `PID.SP` (clipped to `[U_MIN, U_MAX]`, the
+reference model's own actuator bounds, via `_clip_to_flow_bounds`). The
+PLC's own flow-to-`Pump.CMD` conversion is an exact linear map (see
+`plc/scan_engine.py`), so this stays within the cascade rule -- the DCS
+still never writes `Pump.CMD` directly, it writes a setpoint the PLC
+converts locally, the setpoint is just denominated in flow instead of
+level.
 
-Instead (`dcs/controller_wrapper.py`, `UnitController._extract_predicted_sp_m`):
-after every `step()` call, do-mpc has the freshly re-solved predicted state
-trajectory for the whole horizon in `controller.mpc.data.prediction(('_x',
-'h2'))`. Index `PREDICTION_HORIZON_INDEX` (25, out of a 40-step horizon)
-along that array is the model's own prediction of where the controlled
-level should be that many seconds ahead, given the input sequence it just
-optimized. That value (cm -> m) is written as the next `PID.SP`. This
-makes `PID.SP` move along the path the MPC computed, instead of jumping
-straight to the operator's target, while never touching an actuator tag.
+`dcs/main.py` separately writes `rt.nominal_target_m()` -- the DCS's
+actual level target for that unit (the active cycle's current value, or
+the manual constant) -- to `Level.SP`. That tag is not part of the control
+loop at all; it exists purely so the HMI's trend chart shows a genuine
+target-vs-actual comparison.
 
-The index is deliberately not 1 ("one t_step ahead"): with this project's
-real (fast, cm-scale) two-tank dynamics, that produces a genuine
-closed-loop instability, not just a slower convergence. See
-`OPEN_QUESTIONS.md` ("closed-loop instability from
-PREDICTION_HORIZON_INDEX=1") for the full diagnosis: a one-second point on
-a slow, multi-second climb is too close to the current measurement for the
-local PID to see a meaningful error, so it applies near-zero pump command
-even while the MPC's own internal plan calls for sustained near-max flow,
-and the real plant drains under gravity while chasing its own barely-moving
-derived setpoint down to the LL interlock. 25 was chosen empirically as
-deep enough into the horizon to give the local PID real corrective
-authority, while staying clear of the horizon's less-certain terminal edge.
-
-`PID.SP` is additionally clipped in `_clip_to_interlock_bounds` to
-`[MODEL_LEVEL_MIN_M, MODEL_LEVEL_MAX_M]` (0 to `H2_MAX/100`, i.e. 0-0.2 m),
-the ported model's own valid state range, tightened further against the
-unit's real `Level.LL`/`Level.HH` only when those fall inside that range.
-See `OPEN_QUESTIONS.md` for why: the reference model is tuned for a small
-lab rig (0-20 cm), `tools/fake_plc.py` random-walks `Level.PV` over 0-4 m
-with `Level.HH=9`, `Level.LL=0.5`, so using the real interlock band directly
-would pin every `PID.SP` at 0.5 m and defeat the MPC trajectory.
+An earlier version of this file derived `PID.SP` from a point in the
+MPC's *predicted level trajectory* instead (`controller.mpc.data.prediction(('_x',
+'h2'))` at a tuned horizon index) and discarded `flow_cm3s` entirely, on
+the theory that the cascade rule meant writing a level. That translation
+needed empirical tuning to avoid a real closed-loop instability (see
+OPEN_QUESTIONS.md, "closed-loop instability from
+PREDICTION_HORIZON_INDEX=1" and the reconnect-collapse entry, both now
+superseded) and was fragile for a structural reason: the reference
+model's EKF assumes whatever flow it just computed (`u_next=u_val_cm3s` in
+`mpc_core.py`'s `step()`) was the flow actually applied to the plant, but
+under the level-cascade design the *actually applied* flow was whatever a
+separate local level-PID's tuned gains produced -- a different number,
+which could drift the EKF's internal state estimate away from reality
+over a long run. Writing `flow_cm3s` directly removes that mismatch by
+construction: the PLC's conversion is exact and linear, so the applied
+flow matches what the MPC commanded (net of one control cycle's delay),
+which is what the EKF already assumes.
 
 `reference/water_mpc/mpc_core.py`'s `WaterTankController.__init__` needed a
 small adaptation (not a rewrite) to run under the installed do-mpc version;
@@ -221,6 +225,15 @@ flat demo-scale log, not a typed schema.
 
 ## Running standalone against `tools/fake_plc.py`
 
+The "Evidence this was actually run" subsection below is a historical
+record from the original level-based cascade design (`PID.SP` written as
+a level point, see the superseded entries in `OPEN_QUESTIONS.md`) and is
+kept as-is rather than rewritten, since it documents what was actually
+observed at the time. `PID.SP` is a flow (cm3/s) now, not a level in
+meters; see "Mapping from the MPC to PID.SP" above for the current
+behavior, and the "Tests" subsection below for what the current test
+suite verifies.
+
 ```bash
 cd water_plant_DCS
 python tools/fake_plc.py --units 3 --base-port 4840
@@ -286,19 +299,21 @@ cd water_plant_DCS
 python -m pytest dcs/tests -q
 ```
 
-9 tests, all passing (`~90 s`, dominated by do-mpc/ipopt setup cost per
-`UnitController`):
-- `test_bumpless_transfer.py`: first `PID.SP` after enable (and after a
-  disable/re-enable at a different level) stays within 0.02 m of the
-  measurement.
+9 tests, all passing, dominated by do-mpc/ipopt setup cost per
+`UnitController`:
+- `test_bumpless_transfer.py`: the first commanded flow after a reset
+  (enable, or re-enable at a drifted level) stays within the actuator's
+  physical bounds and points the right direction (positive flow when
+  below target) instead of an unphysical value inherited from stale
+  internal state.
 - `test_dead_unit_isolation.py`: `HeartbeatWatchdog` drops a stalled/
   unreachable unit after the configured number of cycles, re-admits it once
   its heartbeat resumes, and one unit's dead state never affects another
   unit's alive state.
-- `test_mpc_bounds.py`: a large setpoint change (near the model ceiling, and
-  one deliberately above the model's physical range) never produces a
-  `PID.SP` outside `[MODEL_LEVEL_MIN_M, MODEL_LEVEL_MAX_M]`; a forced
-  non-convergence holds the last good `PID.SP` unchanged.
+- `test_mpc_bounds.py`: a large setpoint change (near the model's level
+  ceiling, and one deliberately above the model's physical range) never
+  produces a `PID.SP` (flow) outside `[U_MIN, U_MAX]`; a forced
+  non-convergence holds the last good flow unchanged.
 
 ## Environment variables
 

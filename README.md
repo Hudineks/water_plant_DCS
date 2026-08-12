@@ -21,25 +21,36 @@ valve anywhere, one actuator only, matching the real rig exactly.
 
 **The MPC never touches an actuator. It writes setpoints.**
 
-In a real plant, an APC layer sits above the DCS and writes `PID.SP` into
-the regulatory control loops. It never reaches down and moves a valve or a
-pump directly. That separation is what this project demonstrates:
+In a real plant, an APC layer sits above the DCS and writes a setpoint
+into the regulatory control loop. It never reaches down and moves a valve
+or a pump directly. That separation is what this project demonstrates:
 
 ```
-MPC (dcs/)  --writes-->  PID.SP  --tracked by-->  local PID (plc/)  -->  Pump.CMD  -->  pump
+MPC (dcs/)  --writes-->  PID.SP  --converted by-->  plc/ flow-to-command  -->  Pump.CMD  -->  pump
 ```
 
-If the DCS process crashes, dies, or gets disconnected, each PLC unit keeps
-its local PID loop running on the last known setpoint (or falls back to its
-own local setpoint after a watchdog timeout). The plant does not stop
-because a Windows box next to it went down.
+`PID.SP` is a **flow** setpoint (cm³/s), not a level: the MPC already
+computes an optimal flow every solve (that's literally what it optimizes
+for), so `dcs/` writes that number straight through instead of translating
+it into a level point first. The PLC's own conversion from that flow to
+`Pump.CMD` is a fixed, no-feedback calibration curve -- matching the
+original rig exactly, which has no flow sensor either. See
+[`dcs/README.md`](dcs/README.md#mapping-from-the-mpc-to-pidsp) for why an
+earlier version of this project tried writing a level point instead and
+what that cost.
+
+If the DCS process crashes, dies, or gets disconnected, the PLC's own
+watchdog notices the stale setpoint and forces flow to zero (fail-safe)
+rather than continuing to pump on a stale command. The plant does not
+silently keep doing whatever it was last told because a Windows box next
+to it went down.
 
 ## Architecture
 
 ```
                          ┌─────────────────────────────┐
                          │   hmi/  (FastAPI, :8080)     │
-                         │   mimic, trends, APC toggle  │
+                         │  mimic, trends, per-unit cycle │
                          └───────────────┬───────────────┘
                        OPC UA client (units)  │  OPC UA client (dcs)
                  ┌─────────────────────────────┼─────────────────────────────┐
@@ -51,7 +62,7 @@ because a Windows box next to it went down.
    │  interlocks + heartbeat │   │                           │                │
    └────────────▲────────────┘   └────────────▲──────────────┘                │
                  │  OPC UA client (Level.PV, Status.Heartbeat)                │
-                 │  OPC UA write (PID.SP only)                                │
+                 │  OPC UA write (PID.SP flow setpoint, Level.SP target)     │
                  └─────────────────────────────┬───────────────────────────────
                                                 │
                                    ┌────────────┴────────────┐
@@ -86,11 +97,15 @@ same CSV format, same two example profiles.
 By default (`dcs/config.py`, no extra configuration needed):
 
 - **Unit 1** tracks [`cycles/step_response.csv`](cycles/step_response.csv):
-  flat, then a step. The MPC starts moving `PID.SP` ahead of the step
-  because it previewed it across its solve horizon, not because the level
-  already drifted off target.
+  flat, then a step. The MPC starts moving `PID.SP` (its commanded flow)
+  ahead of the step because it previewed the upcoming level change across
+  its solve horizon, not because the level already drifted off target.
+  `Level.SP` (the DCS's actual level target, see below) itself steps
+  instantly -- it is the flow the MPC produces to get there that ramps in
+  early.
 - **Unit 2** tracks [`cycles/ramp_response.csv`](cycles/ramp_response.csv):
-  a ramp. `PID.SP` moves smoothly along it.
+  a ramp. `Level.SP` moves smoothly along it and `PID.SP` tracks whatever
+  flow the MPC judges will follow that ramp.
 - **Unit 3** holds a plain constant setpoint, the simple baseline.
 
 See [`demos/demo_e_setpoint_cycles.py`](demos/demo_e_setpoint_cycles.py),
@@ -110,8 +125,12 @@ random-walk values, so `dcs/` and `hmi/` could be built and tested before
 [`reference/water_mpc/`](reference/water_mpc) holds the do-mpc + EKF
 controller ported from the original Vodarna rig, unmodified in its model,
 objective, constraints, and solver settings. `dcs/controller_wrapper.py`
-adapts its interface to the cascade (see [`dcs/README.md`](dcs/README.md)
-for exactly how a predicted level trajectory becomes `PID.SP`).
+adapts its interface to the cascade: the MPC's own optimal-flow output
+(`MPCResult.flow_cm3s`) is clipped to the actuator's physical bounds and
+written straight through as `PID.SP` (see
+[`dcs/README.md`](dcs/README.md#mapping-from-the-mpc-to-pidsp) for why
+that's a direct write rather than something derived from the predicted
+level trajectory).
 
 ## Running it
 

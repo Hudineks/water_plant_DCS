@@ -182,6 +182,7 @@ function renderUnit(unit, h1Estimated, control) {
 
   const pv = v["Level.PV"];
   const sp = v["Level.SP"];
+  const flowSp = v["PID.SP"];
   const hh = v["Level.HH"];
   const ll = v["Level.LL"];
   const fillPct = tankLevelPct(pv ?? 0, hh);
@@ -241,9 +242,9 @@ function renderUnit(unit, h1Estimated, control) {
       <span class="hint">OFF = DCS ignores this unit entirely (manual SP below takes over). MANUAL = DCS still actively holds the field's target.</span>
     </div>
     <div class="sp-row">
-      <span class="label mono">MANUAL SP</span>
-      <input type="number" step="0.1" data-sp-input="${unit.unit_id}" placeholder="${fmt(sp, 2)}" ${cycleIsOff ? "" : "disabled"}>
-      <span class="mono">m</span>
+      <span class="label mono">MANUAL FLOW</span>
+      <input type="number" step="0.5" min="0" max="17" data-sp-input="${unit.unit_id}" placeholder="${fmt(flowSp, 1)}" title="raw PID.SP write, bypasses the DCS entirely" ${cycleIsOff ? "" : "disabled"}>
+      <span class="mono">cm&sup3;/s</span>
       <button data-sp-submit="${unit.unit_id}" ${connected && cycleIsOff ? "" : "disabled"}>WRITE</button>
       ${cycleIsOff ? "" : '<span class="hint">set CYCLE to OFF to hold a manual write</span>'}
     </div>

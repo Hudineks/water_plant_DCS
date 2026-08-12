@@ -130,10 +130,18 @@ class UnitClient:
         except Exception:
             return {}
 
-    async def write_pid_sp(self, value_m: float) -> None:
+    async def write_pid_sp(self, value_flow_cm3s: float) -> None:
         if not self.connected or "PID.SP" not in self._nodes:
             raise RuntimeError(f"Unit{self.unit_id} not connected, cannot write PID.SP")
-        await self._nodes["PID.SP"].write_value(float(value_m))
+        await self._nodes["PID.SP"].write_value(float(value_flow_cm3s))
+
+    async def write_level_sp(self, value_m: float) -> None:
+        """Level.SP is the DCS's own real level target (see tags.yaml),
+        not part of the control loop (that runs on flow, see write_pid_sp
+        above) -- purely for the HMI/operator to compare against Level.PV."""
+        if not self.connected or "Level.SP" not in self._nodes:
+            raise RuntimeError(f"Unit{self.unit_id} not connected, cannot write Level.SP")
+        await self._nodes["Level.SP"].write_value(float(value_m))
 
     async def read_bounds(self) -> tuple[float, float]:
         """Return (Level.LL, Level.HH) in meters, defaults if unavailable."""

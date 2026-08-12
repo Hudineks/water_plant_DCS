@@ -1,7 +1,8 @@
 # plc/ — simulated PLC unit
 
-One process = one tank unit (two tanks in series, one pump, local PID,
-interlocks), exposed over OPC UA using the exact address space defined in
+One process = one tank unit (two tanks in series, one pump, a static
+flow-to-command conversion, interlocks), exposed over OPC UA using the
+exact address space defined in
 `water_plant_DCS/tags.yaml`. Run several instances with different `UNIT_ID`
 and `OPCUA_PORT` to simulate several units.
 
@@ -18,12 +19,12 @@ module needs `plantbus/` and `tags.yaml` as siblings, same as `tools/fake_plc.py
 `unit.py` runs a fixed 100 ms wall-clock loop (`SCAN_PERIOD_S`), same shape
 as a real PLC scan:
 
-1. **Read inputs** — read `PID.SP` from OPC UA (this is the only input a DCS
-   can write) and its write timestamp.
+1. **Read inputs** — read `PID.SP` from OPC UA (a flow setpoint, cm3/s;
+   this is the only input a DCS can write) and its write timestamp.
 2. **Execute logic** — `scan_engine.ScanEngine.scan()`: watchdog check, mode
-   resolution, interlock evaluation, PID compute, tank integration. This part
-   has no OPC UA dependency and is what `plc/tests/test_scan_engine.py` drives
-   directly.
+   resolution, interlock evaluation, flow-to-`Pump.CMD` conversion, tank
+   integration. This part has no OPC UA dependency and is what
+   `plc/tests/test_scan_engine.py` drives directly.
 3. **Write outputs** — every unit tag in `tags.yaml` is written back to its
    OPC UA node.
 4. Sleep out the remainder of the 100 ms budget (`Status.ScanTime_ms` reports
@@ -64,24 +65,38 @@ Engineering units, matching tags.yaml:
 
 | Tag | Unit | Notes |
 |---|---|---|
-| Level.PV / SP / HH / LL | m | downstream tank level (h2), the measured/controlled one |
+| Level.PV / HH / LL | m | downstream tank level (h2), the measured/controlled one |
+| Level.SP | m | the DCS's own level target, written by dcs/, not computed here (see "Regulatory layer" below) |
 | Pump.CMD / FB | % | 0-100, no actuator lag modeled |
-| PID.SP | m | cascade setpoint from the DCS |
-| PID.OUT | % | pre-limit PID output (limits are 0-100 in this simulation, so it equals Pump.CMD) |
+| PID.SP | cm3/s | cascade flow setpoint from the DCS |
+| PID.OUT | % | commanded flow-to-percent output before the interlock zeroes it (equals Pump.CMD unless tripped) |
 | Status.ScanTime_ms | ms | measured duration of step 2-3 above |
 
-## Regulatory layer (PID)
+## Regulatory layer ("PID" in name only)
 
-`pid.py`: positional PID, derivative on measurement (no setpoint kick),
-output clamped to 0-100%, anti-windup by conditional integration (the
-integral only accumulates while the output is not saturated, or while the
-error is already pulling it back inside the limits).
+There is no closed loop here. `PID.SP` is a flow (cm3/s), and `Pump.CMD`
+is a fixed linear conversion of it (`100 * flow / pump_max_flow_cm3s`,
+clamped 0-100) -- the same kind of static calibration curve the real rig
+uses (no flow sensor, no feedback, see `reference/water_mpc/`'s original
+`write_actuator_q0`). "PID" in the tag/mode names (`PID.SP`, `PID.OUT`,
+`PID.Mode`) is a naming holdover from the contract, not a controller that
+runs in this file -- there used to be one (a level-tracking closed loop
+with tuned gains), removed when `PID.SP`'s meaning changed from a level
+target to a flow target; see OPEN_QUESTIONS.md for why.
+
+`Level.SP` is *not* computed here either: it is the DCS's actual level
+target (from the active cycle or its manual constant), written directly
+by `dcs/main.py` -- see `dcs/README.md`. The PLC only seeds it at 0.0 at
+startup and never writes it again.
 
 Modes:
 
-- **CASCADE** — PID follows `PID.SP` as written by the DCS.
-- **AUTO** — PID follows an internally held local setpoint.
-- **MAN** — PID is bypassed, `Pump.CMD` is held at whatever it last was.
+- **CASCADE** — `Pump.CMD` follows `PID.SP` (a flow command) as written by
+  the DCS, clipped to `[0, pump_max_flow_cm3s]`.
+- **AUTO** — fail-safe: flow forced to 0, unconditionally, no configurable
+  fallback value.
+- **MAN** — the flow conversion is bypassed, `Pump.CMD` is held at
+  whatever it last was.
 
 See OPEN_QUESTIONS.md for why mode selection and the MAN pump command are
 internal-only in this build: tags.yaml does not expose a writable mode-select
@@ -121,11 +136,12 @@ timestamp of the last write to `PID.SP`. If the unit is in CASCADE and that
 write is older than 30 seconds (`SP_STALE_TIMEOUT_S`, generous enough to
 survive a real DCS's own startup latency, roughly 10-15s to build 3
 do-mpc/casadi MPC controllers, without tripping AUTO before the DCS ever
-gets a chance to write), the unit drops to AUTO on the last known good
-setpoint and logs a warning. It stays in AUTO until the process is restarted
-(there is no writable mode-select tag to put it back into CASCADE, see
-OPEN_QUESTIONS.md) — a real DCS resuming its writes will find the unit
-already fell back rather than silently running open-loop.
+gets a chance to write), the unit drops to AUTO -- flow forced to 0,
+fail-safe, not held at the last commanded value -- and logs a warning. It
+stays in AUTO until the process is restarted (there is no writable
+mode-select tag to put it back into CASCADE, see OPEN_QUESTIONS.md) — a
+real DCS resuming its writes will find the unit already fell back rather
+than silently running open-loop.
 
 ## Configuration (env vars)
 
@@ -136,9 +152,7 @@ already fell back rather than silently running open-loop.
 | `TIME_SCALE` | `1.0` | Simulated-time multiplier, see "Scan structure" above |
 | `LEVEL_HH` | `0.18` | HH interlock threshold, m |
 | `LEVEL_LL` | `0.01` | LL interlock threshold, m |
-| `UNIT_LOCAL_SP` | `0.10` | Initial AUTO-mode local setpoint, m |
-| `PID_KP` / `PID_KI` / `PID_KD` | `600.0` / `10.0` / `100.0` | PID gains, tuned for the two-tank rig's much smaller, much faster-responding scale (see `plc/tests/test_scan_engine.py` for the empirical basis) |
-| `PUMP_MAX_FLOW_CM3S` | `17.0` | Inflow at 100% pump, cm³/s, matches `reference/water_mpc/mpc_core.py`'s `U_MAX` |
+| `PUMP_MAX_FLOW_CM3S` | `17.0` | Inflow at 100% pump, cm³/s, matches `reference/water_mpc/mpc_core.py`'s `U_MAX`, and is the slope of the flow-to-`Pump.CMD` conversion |
 | `INITIAL_LEVEL_M` | `0.05` | Starting level for both tanks, m |
 | `UNIT_INITIAL_MODE` | `CASCADE` | AUTO / MAN / CASCADE at startup |
 | `RESET_FILE` | `./unit<UNIT_ID>.reset` | Path polled each scan for a manual interlock reset |
@@ -171,9 +185,11 @@ steady state matches the Torricelli balance analytically, and the upstream
 tank leads the downstream tank during a fill.
 
 `plc/tests/test_scan_engine.py` covers `ScanEngine` directly (no OPC UA
-needed to run these): PID settling after a setpoint step, HH interlock
-latching and manual reset, and the CASCADE-to-AUTO fallback on a stale
-`PID.SP`. Kept under `plc/tests/` rather
+needed to run these): the flow-to-`Pump.CMD` conversion is linear and
+clips correctly, the level converges to the analytic Torricelli steady
+state for a sustained CASCADE flow, HH interlock latching and manual
+reset, and the CASCADE-to-AUTO fallback on a stale `PID.SP` forces flow
+to exactly 0. Kept under `plc/tests/` rather
 than a top-level `tests/plc/` because the engine has no dependency outside
 `plc/` and this keeps the test next to the code it exercises, consistent
 with `tools/` and `plantbus/` each owning their own concerns.

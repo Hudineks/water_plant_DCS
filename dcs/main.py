@@ -129,9 +129,9 @@ async def control_loop(
                         # solve mixes a stale internal state estimate with a
                         # fresh, unrelated measurement, which can produce a
                         # bad PID.SP and drive the real plant toward its LL
-                        # interlock exactly like the bug PREDICTION_HORIZON_INDEX=25
-                        # already fixes for a too-shallow horizon (see
-                        # OPEN_QUESTIONS.md) -- same symptom, different cause.
+                        # interlock -- a second, independent cause of the
+                        # same collapse-to-LL failure mode documented in
+                        # OPEN_QUESTIONS.md.
                         logger.info("Unit%d: (re)connected, forcing bumpless reset", rt.unit_id)
                         rt.controller.request_bumpless_reset()
                     rt.was_alive = True
@@ -180,11 +180,12 @@ async def control_loop(
                 rt.last_converged = result.converged
                 rt.last_solve_time_ms = result.solve_time_ms
                 if not result.converged:
-                    logger.warning("Unit%d: MPC did not converge, holding last SP (%.3f m)", unit_id, result.sp_m)
+                    logger.warning("Unit%d: MPC did not converge, holding last flow SP (%.3f cm3/s)", unit_id, result.sp_flow_cm3s)
                 try:
-                    await rt.client.write_pid_sp(result.sp_m)
+                    await rt.client.write_pid_sp(result.sp_flow_cm3s)
+                    await rt.client.write_level_sp(rt.nominal_target_m())
                 except Exception as exc:
-                    logger.warning("Unit%d: failed to write PID.SP (%s)", unit_id, exc)
+                    logger.warning("Unit%d: failed to write PID.SP/Level.SP (%s)", unit_id, exc)
 
                 h1_estimated_m = float(rt.controller.controller.x_hat[0, 0]) / 100.0
                 await global_server.publish_diagnostics(unit_id, h1_estimated_m)

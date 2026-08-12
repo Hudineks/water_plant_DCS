@@ -4,7 +4,13 @@ This is a port of src/models/mpc_water_tank_controller.py from the original
 Vodarna project. Removed: DAQ (nidaqmx) I/O, matplotlib live plotting, CSV
 recipe/cycle playback, GUI threading. Kept: the do-mpc model, the MPC
 objective/constraints/solver settings, the EKF, and the anti-windup term,
-unchanged in substance from the original.
+unchanged in substance from the original -- with one addition: WaterTankController.step()
+now clamps the EKF's e_int estimate to +-20 (see the comment at that clamp
+for why). The original's own e_int bound (+-1000, still set on the MPC's
+own decision variable below) never actually got exercised in the short,
+GUI-driven sessions this was ported from; running this port continuously
+for OPC UA's water_plant_DCS project exposed a real, unbounded windup that
+the +-1000 bound alone did not catch (see water_plant_DCS/OPEN_QUESTIONS.md).
 
 Units: the original model works in centimeters (tank geometry was specified
 in mm/cm). tags.yaml uses meters for Level.PV/SP. WaterTankController exposes
@@ -266,8 +272,19 @@ class WaterTankController:
                 y_next=y_next, u_next=u_next,
                 Q_k=np.diag([1e-2, 1e-2, 1e-2]), R_k=np.diag([0.05 ** 2]),
             )
+            # e_int has zero objective weight (Q_INT=0.0) and its model-level
+            # anti-windup (aw_factor) only gates growth near U_MIN/U_MAX, so
+            # a small persistent residual lets it grow unboundedly over a
+            # long session, well past the +-1000 model bound that the
+            # original short GUI-driven sessions never actually hit. Past a
+            # few hundred, its magnitude in x_hat (fed back as mpc.x0 every
+            # solve) numerically destabilizes ipopt's tightly-budgeted solve
+            # into chaotic bang-bang q0, despite having no bearing on the
+            # objective itself -- confirmed by direct experiment: this clamp
+            # is what keeps a long session holding its target instead of
+            # collapsing after ~150s.
             self.x_hat = np.clip(
-                _dm_to_array(x_hat_dm), [[0.0], [0.0], [-np.inf]], [[H2_MAX * 2], [H2_MAX * 2], [np.inf]]
+                _dm_to_array(x_hat_dm), [[0.0], [0.0], [-20.0]], [[H2_MAX * 2], [H2_MAX * 2], [20.0]]
             )
             self.ekf.x0 = self.x_hat
         except Exception:

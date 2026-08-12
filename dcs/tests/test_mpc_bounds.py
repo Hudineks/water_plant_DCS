@@ -1,8 +1,7 @@
-"""The MPC must respect level bounds even on a large setpoint change, and
-PID.SP must never leave the ported model's valid envelope
-(MODEL_LEVEL_MIN_M..MODEL_LEVEL_MAX_M, see controller_wrapper.py), which is
-the practical bound the DCS enforces regardless of what target is asked
-for.
+"""The MPC's commanded flow (PID.SP) must never leave the actuator's own
+physical bounds (U_MIN..U_MAX, reference/water_mpc/mpc_core.py), regardless
+of what level target is asked for, even when that target is unreasonable
+or the level is nowhere near it yet.
 """
 from __future__ import annotations
 
@@ -11,57 +10,65 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from dcs.controller_wrapper import MODEL_LEVEL_MAX_M, MODEL_LEVEL_MIN_M, UnitController
+from dcs.controller_wrapper import UnitController
+from plc.model import TankModel
+from reference.water_mpc.mpc_core import U_MAX, U_MIN
 
 
 def test_large_setpoint_change_stays_within_bounds():
     controller = UnitController(unit_id=1)
     controller.request_bumpless_reset()
 
-    level_m = 0.02
-    # Ask for a large jump, close to the top of the model's valid range.
-    target_m = MODEL_LEVEL_MAX_M * 0.95
+    model = TankModel(h1_cm=2.0, h2_cm=2.0)
+    target_m = 0.15  # near the model's own ceiling (H2_MAX=20cm=0.2m)
 
-    for _ in range(60):
+    for _ in range(300):
+        level_m = model.h2_cm / 100.0
         result = controller.step(target_m, level_m, level_hh_m=9.0, level_ll_m=0.5)
-        assert MODEL_LEVEL_MIN_M - 1e-9 <= result.sp_m <= MODEL_LEVEL_MAX_M + 1e-9, (
-            f"PID.SP {result.sp_m:.4f} m left the model's valid envelope "
-            f"[{MODEL_LEVEL_MIN_M}, {MODEL_LEVEL_MAX_M}]"
+        assert U_MIN - 1e-9 <= result.sp_flow_cm3s <= U_MAX + 1e-9, (
+            f"PID.SP {result.sp_flow_cm3s:.4f} cm3/s left the actuator's valid range "
+            f"[{U_MIN}, {U_MAX}]"
         )
-        level_m = result.sp_m  # pretend the PID tracks the SP exactly
+        pump_cmd_pct = 100.0 * result.sp_flow_cm3s / model.pump_max_flow_cm3s
+        model.step(pump_cmd_pct, dt_s=1.0)
 
-    # After enough cycles the setpoint trajectory should have made real
+    # After enough cycles the real (simulated) level should have made
     # progress toward the target, not stayed pinned at the start.
-    assert level_m > 0.05
+    assert model.h2_cm / 100.0 > 0.05
 
 
-def test_target_above_model_ceiling_does_not_overshoot_bound():
-    """Ask for a target above what the model can physically represent
-    (bigger than H2_MAX). PID.SP must still clip to the model ceiling
-    instead of being written past it.
+def test_target_above_model_ceiling_does_not_overshoot_flow_bounds():
+    """Ask for a level target above what the model can physically
+    represent (far beyond H2_MAX). The commanded flow must still respect
+    the actuator's own bounds -- the MPC's hard constraint on q0
+    (mpc.bounds['upper','_u','q0']=U_MAX in mpc_core.py's build_mpc())
+    should make this true regardless of how unreasonable the target is.
     """
     controller = UnitController(unit_id=1)
     controller.request_bumpless_reset()
 
-    level_m = 0.02
+    model = TankModel(h1_cm=2.0, h2_cm=2.0)
     target_m = 5.0  # far outside the ported rig model's range
 
     for _ in range(60):
+        level_m = model.h2_cm / 100.0
         result = controller.step(target_m, level_m, level_hh_m=9.0, level_ll_m=0.5)
-        assert result.sp_m <= MODEL_LEVEL_MAX_M + 1e-9
-        level_m = result.sp_m
+        assert U_MIN - 1e-9 <= result.sp_flow_cm3s <= U_MAX + 1e-9
+        pump_cmd_pct = 100.0 * result.sp_flow_cm3s / model.pump_max_flow_cm3s
+        model.step(pump_cmd_pct, dt_s=1.0)
 
 
 def test_solver_failure_holds_last_setpoint():
     """When the underlying MPC step reports non-convergence, the wrapper
-    must return the last good SP unchanged, not a fresh (unvalidated) value.
+    must return the last good flow unchanged, not a fresh (unvalidated)
+    value.
     """
     controller = UnitController(unit_id=1)
     controller.request_bumpless_reset()
 
     result = controller.step(0.15, 0.05, level_hh_m=9.0, level_ll_m=0.5)
     assert result.converged
-    good_sp = result.sp_m
+    good_flow = result.sp_flow_cm3s
 
     # Force a failure the same way controller.controller.step() would
     # report one: monkeypatch the inner controller's step to simulate
@@ -72,8 +79,8 @@ def test_solver_failure_holds_last_setpoint():
         return MPCResult(flow_cm3s=0.0, solve_time_ms=999.0, converged=False)
 
     controller.controller.step = failing_step
-    held = controller.step(0.15, level_measured_m=good_sp, level_hh_m=9.0, level_ll_m=0.5)
+    held = controller.step(0.15, level_measured_m=0.05, level_hh_m=9.0, level_ll_m=0.5)
 
     assert held.converged is False
     assert held.held_last_sp is True
-    assert held.sp_m == good_sp
+    assert held.sp_flow_cm3s == good_flow

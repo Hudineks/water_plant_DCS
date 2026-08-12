@@ -46,10 +46,6 @@ def _load_config() -> dict:
         time_scale=_env_float("TIME_SCALE", 1.0),
         hh=_env_float("LEVEL_HH", 0.18),
         ll=_env_float("LEVEL_LL", 0.01),
-        local_sp=_env_float("UNIT_LOCAL_SP", 0.10),
-        pid_kp=_env_float("PID_KP", 600.0),
-        pid_ki=_env_float("PID_KI", 10.0),
-        pid_kd=_env_float("PID_KD", 100.0),
         pump_max_flow_cm3s=_env_float("PUMP_MAX_FLOW_CM3S", 17.0),
         initial_level_m=_env_float("INITIAL_LEVEL_M", 0.05),
         initial_mode=os.environ.get("UNIT_INITIAL_MODE", "CASCADE"),
@@ -76,21 +72,19 @@ async def run(cfg: dict) -> None:
     engine = ScanEngine(
         hh=cfg["hh"],
         ll=cfg["ll"],
-        local_sp=cfg["local_sp"],
-        pid_kp=cfg["pid_kp"],
-        pid_ki=cfg["pid_ki"],
-        pid_kd=cfg["pid_kd"],
         pump_max_flow_cm3s=cfg["pump_max_flow_cm3s"],
         initial_level_m=cfg["initial_level_m"],
         initial_mode=cfg["initial_mode"],
     )
 
     # Seed static/initial values so a client connecting before the first scan
-    # completes still sees sane numbers.
+    # completes still sees sane numbers. PID.SP and Level.SP are both
+    # DCS-owned (see tags.yaml); the PLC seeds them at 0.0 and never writes
+    # either again -- the DCS's own first write takes over from there.
     await nodes["Level.HH"].write_value(engine.interlock.hh)
     await nodes["Level.LL"].write_value(engine.interlock.ll)
     await nodes["Interlock.Reason"].write_value("")
-    await nodes["PID.SP"].write_value(engine.local_sp)
+    await nodes["PID.SP"].write_value(0.0)
     await nodes["PID.Mode"].write_value(engine.mode)
 
     reset_path = Path(cfg["reset_file"])
@@ -124,7 +118,6 @@ async def run(cfg: dict) -> None:
 
             # --- WRITE OUTPUTS ---
             await nodes["Level.PV"].write_value(out.level_pv)
-            await nodes["Level.SP"].write_value(out.level_sp)
             await nodes["Level.HH"].write_value(out.level_hh)
             await nodes["Level.LL"].write_value(out.level_ll)
             await nodes["Pump.CMD"].write_value(out.pump_cmd)

@@ -3,22 +3,29 @@ the PID.SP value that gets written to the PLC.
 
 Mapping from MPC internals to PID.SP (documented in dcs/README.md):
 
-The reference controller's public output (MPCResult.flow_cm3s) is an
-actuator flow command. Per the cascade rule (MPC -> PID.SP -> PID -> pump)
-this project never writes actuator commands from the supervisory layer, so
-flow_cm3s is not used at all here.
+reference/water_mpc/mpc_core.py's WaterTankController.step() already
+computes an optimal flow every solve (MPCResult.flow_cm3s) -- that is
+literally what the MPC optimizes for. PID.SP is that flow, clipped to the
+model's own actuator bounds, written straight through. Per tags.yaml this
+project's cascade still never writes an actuator command from the
+supervisory layer directly: the PLC converts this flow into Pump.CMD
+itself (a fixed calibration curve, no closed loop, see plc/scan_engine.py)
+in CASCADE mode, so PID.SP stays a setpoint, not a valve/pump write.
 
-Instead, after every controller.step() call, do-mpc has already stored the
-predicted state trajectory for the horizon it just solved
-(controller.mpc.data.prediction(('_x', 'h2'))). Index PREDICTION_HORIZON_INDEX
-of that array (see that constant's own comment for why it isn't 1) is the
-model's prediction of the controlled level that many seconds into the
-future under the optimal input sequence it just found. That single point
-is converted from cm to m and written as the next PID.SP. This gives the
-PLC's local PID loop a setpoint trajectory shaped by the MPC's horizon (it
-moves the SP toward the operator target along the path the MPC computed)
-instead of slamming the full target in one step, while still never
-writing to Pump.CMD directly.
+Earlier versions of this file wrote a *level* point instead, extracted
+from the MPC's predicted h2 trajectory at a tuned horizon index, and threw
+flow_cm3s away entirely. That translation was both unnecessary work and a
+real source of instability: the EKF inside step() assumes whatever flow
+it just computed was the flow actually applied to the plant
+(`u_next=u_val_cm3s` in mpc_core.py), but the real applied flow was
+whatever a separate local level-PID's gains produced, which is a
+different number. That mismatch could drift the internal state estimate
+away from reality over a long run. Writing flow_cm3s directly removes the
+mismatch by construction: the PLC's flow-to-Pump.CMD map is exact and
+linear, so what gets applied is (net of one control cycle's delay)
+exactly what the MPC commanded, matching the EKF's own assumption instead
+of fighting it. See OPEN_QUESTIONS.md for the two collapse bugs this
+design replaces.
 """
 from __future__ import annotations
 
@@ -31,58 +38,29 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from reference.water_mpc.mpc_core import (  # noqa: E402
-    H2_MAX,
     MPCResult,
     TIME_STEP_S,
+    U_MAX,
+    U_MIN,
     WaterTankController,
     build_ekf,
     build_mpc,
     build_model,
 )
 
-# The ported model's physically valid envelope for the controlled level
-# (h2, cm -> m). See OPEN_QUESTIONS.md: this is much smaller than the plant
-# tags' scale (Level.PV random-walks 0-4 m in tools/fake_plc.py, HH default
-# 9 m). PID.SP is always clipped to this range regardless of the unit's own
-# Level.LL/Level.HH, since those interlock thresholds are set for the real
-# tank geometry, not the cm-scale rig the reference controller was tuned
-# for, and would clip every SP to Level.LL otherwise.
-MODEL_LEVEL_MAX_M = H2_MAX / 100.0
-MODEL_LEVEL_MIN_M = 0.0
-
-# Index into the MPC's predicted horizon used as the next PID.SP, out of
-# n_horizon=40 (see reference/water_mpc/mpc_core.py). NOT 1 ("one t_step
-# ahead"): that value produces a real closed-loop instability, see
-# OPEN_QUESTIONS.md. With the two-tank model's real (fast, cm-scale)
-# dynamics, the point one second into the MPC's own plan is barely
-# different from the current measurement, since the plan reaches its
-# target gradually over the full horizon. The local PID then sees a
-# near-zero error and applies near-zero pump command, even though the
-# MPC's own internal plan calls for a large, sustained flow, so the real
-# plant just drains under gravity while the DCS's derived setpoint drifts
-# down with it. 25 was chosen empirically (see OPEN_QUESTIONS.md for the
-# sweep) as a point far enough into the horizon to carry real, trackable
-# separation from the current measurement, while still comfortably inside
-# the 40-step horizon rather than at its less-certain terminal edge.
-PREDICTION_HORIZON_INDEX = 25
-
 
 class _PortedWaterTankController(WaterTankController):
     """WaterTankController with its __init__ adapted for do-mpc 5.1.1
     (the version pinned in requirements.txt). The original __init__ from
-    reference/water_mpc/mpc_core.py (frozen, not edited) has two problems
-    against this do-mpc version, both fixed here without touching the
-    model, objective, constraints or solver settings built by
+    reference/water_mpc/mpc_core.py (frozen, not edited) has a problem
+    against this do-mpc version, fixed here without touching the model,
+    objective, constraints or solver settings built by
     build_model()/build_mpc()/build_ekf():
 
-    1. mpc.set_tvp_fun() validates its argument by calling it immediately.
-       The tvp function reads self._sp_cm, which the original __init__ only
-       assigns *after* calling set_tvp_fun, raising AttributeError. Fixed
-       by assigning self._sp_cm = 0.0 before set_tvp_fun().
-    2. mpc.data.prediction() (used below to read the predicted h2
-       trajectory for PID.SP, see this module's docstring) requires
-       store_full_solution=True, which the original build_mpc() does not
-       set. Fixed by setting it on the mpc object before mpc.setup().
+    mpc.set_tvp_fun() validates its argument by calling it immediately.
+    The tvp function reads self._sp_cm, which the original __init__ only
+    assigns *after* calling set_tvp_fun, raising AttributeError. Fixed by
+    assigning self._sp_cm = 0.0 before set_tvp_fun().
 
     reset_to_measurement() and step() are inherited unchanged.
     """
@@ -91,7 +69,6 @@ class _PortedWaterTankController(WaterTankController):
         self.t_step = t_step
         self.model = build_model()
         self.mpc = build_mpc(self.model, n_horizon=n_horizon, t_step=t_step)
-        self.mpc.settings.store_full_solution = True
         self.ekf = build_ekf(self.model, t_step=t_step)
 
         self._tvp_template_mpc = self.mpc.get_tvp_template()
@@ -114,7 +91,7 @@ class _PortedWaterTankController(WaterTankController):
 
 @dataclass
 class ControlResult:
-    sp_m: float
+    sp_flow_cm3s: float
     solve_time_ms: float
     converged: bool
     held_last_sp: bool
@@ -129,7 +106,7 @@ class UnitController:
     def __init__(self, unit_id: int, level_ll_m: float = 0.0, level_hh_m: float = 9.0):
         self.unit_id = unit_id
         self.controller = _PortedWaterTankController()
-        self.last_sp_m: float | None = None
+        self.last_flow_cm3s: float | None = None
         self.needs_bumpless_reset = True
         self.level_ll_m = level_ll_m
         self.level_hh_m = level_hh_m
@@ -175,50 +152,36 @@ class UnitController:
     def request_bumpless_reset(self) -> None:
         """Call when a unit starts being solved again: APC.Enabled
         transitions False -> True (legacy global path) or, per-unit, when
-        set_setpoint_source() changes what this unit is tracking."""
+        set_setpoint_source() changes what this unit is tracking, or the
+        unit's OPC UA client reconnects after a gap (see dcs/main.py's
+        control_loop, was_alive tracking)."""
         self.needs_bumpless_reset = True
 
-    def _clip_to_interlock_bounds(self, sp_m: float, level_hh_m: float, level_ll_m: float) -> float:
-        # Clip to the ported model's own valid envelope first (see
-        # MODEL_LEVEL_MAX_M above), then further tighten against the unit's
-        # real interlock band only if that band happens to fall inside the
-        # model's envelope (it does not in this demo's fake_plc defaults,
-        # see OPEN_QUESTIONS.md, so this is a no-op there but keeps the
-        # logic correct if plc/ later ships bounds inside the model range).
-        margin = 0.005
-        lo = max(MODEL_LEVEL_MIN_M, level_ll_m + margin) if level_ll_m + margin <= MODEL_LEVEL_MAX_M else MODEL_LEVEL_MIN_M
-        hi = min(MODEL_LEVEL_MAX_M, level_hh_m - margin) if level_hh_m - margin >= MODEL_LEVEL_MIN_M else MODEL_LEVEL_MAX_M
-        if hi < lo:
-            lo, hi = MODEL_LEVEL_MIN_M, MODEL_LEVEL_MAX_M
-        return max(lo, min(hi, sp_m))
+    @staticmethod
+    def _clip_to_flow_bounds(flow_cm3s: float) -> float:
+        # Physical actuator bounds only (0..U_MAX cm3/s, the reference
+        # model's own pump limits). No level-based clipping: the MPC's
+        # own state constraints (mpc.bounds['upper','_x','h2'] in
+        # build_mpc()) already make it choose low flow near its level
+        # ceiling as an emergent property of the optimization, so a
+        # manual level-based post-hoc clip on the flow output was never
+        # doing useful work here. Level.LL/HH stay enforced independently
+        # by the PLC's own interlocks (plc/interlocks.py).
+        return max(U_MIN, min(U_MAX, flow_cm3s))
 
     def step(self, target_level_m: float, level_measured_m: float, level_hh_m: float, level_ll_m: float) -> ControlResult:
         if self.needs_bumpless_reset:
             self.controller.reset_to_measurement(level_measured_m)
             self.needs_bumpless_reset = False
-            if self.last_sp_m is None:
-                self.last_sp_m = level_measured_m
 
         result: MPCResult = self.controller.step(setpoint_m=target_level_m, level_measured_m=level_measured_m)
 
         if not result.converged:
-            # Hold the last good setpoint, do not write a fresh one derived
+            # Hold the last good flow, do not write a fresh one derived
             # from a failed solve.
-            held_sp = self.last_sp_m if self.last_sp_m is not None else level_measured_m
-            return ControlResult(sp_m=held_sp, solve_time_ms=result.solve_time_ms, converged=False, held_last_sp=True)
+            held_flow = self.last_flow_cm3s if self.last_flow_cm3s is not None else 0.0
+            return ControlResult(sp_flow_cm3s=held_flow, solve_time_ms=result.solve_time_ms, converged=False, held_last_sp=True)
 
-        sp_m = self._extract_predicted_sp_m(fallback_m=self.last_sp_m or level_measured_m)
-        sp_m = self._clip_to_interlock_bounds(sp_m, level_hh_m, level_ll_m)
-        self.last_sp_m = sp_m
-        return ControlResult(sp_m=sp_m, solve_time_ms=result.solve_time_ms, converged=True, held_last_sp=False)
-
-    def _extract_predicted_sp_m(self, fallback_m: float) -> float:
-        try:
-            prediction_cm = self.controller.mpc.data.prediction(("_x", "h2"))
-            # Shape from do-mpc 5.1.1: (n_scenarios, n_horizon+1, n_elements).
-            # Take the near-term point (index PREDICTION_HORIZON_INDEX along
-            # the horizon axis), first (only) scenario and element.
-            value_cm = float(prediction_cm[0, PREDICTION_HORIZON_INDEX, 0])
-            return value_cm / 100.0
-        except Exception:
-            return fallback_m
+        flow_cm3s = self._clip_to_flow_bounds(result.flow_cm3s)
+        self.last_flow_cm3s = flow_cm3s
+        return ControlResult(sp_flow_cm3s=flow_cm3s, solve_time_ms=result.solve_time_ms, converged=True, held_last_sp=False)
