@@ -225,7 +225,7 @@ function renderUnit(unit, h1Estimated, control) {
         <span class="k">PID OUT</span><span class="v">${fmt(v["PID.OUT"], 1, "%")}</span>
         <span class="k">MODE</span><span class="v"><span class="mode-tag">${mode}</span></span>
         <span class="k">HEARTBEAT</span><span class="v">${fmt(v["Status.Heartbeat"], 0)}</span>
-        <span class="k">SCAN</span><span class="v">${fmt(v["Status.ScanTime_ms"], 0, "ms")}</span>
+        <span class="k">SCAN</span><span class="v">${fmt(v["Status.ScanTime_ms"], 1)} / 100 ms<span class="hint"> jitter ${fmt(v["Status.ScanJitter_ms"], 1, "ms")}</span></span>
       </div>
     </div>
     <div class="trend-legend mono">

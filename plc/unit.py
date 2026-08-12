@@ -95,9 +95,27 @@ async def run(cfg: dict) -> None:
         cfg["unit_id"], cfg["port"], cfg["time_scale"], dt_sim, reset_path,
     )
 
+    # Real time from one scan's start to the next -- distinct from
+    # Status.ScanTime_ms (pure execute-logic duration, excludes OPC UA I/O
+    # and the sleep below). max_jitter_ms is the largest deviation of that
+    # period from SCAN_PERIOD_S seen since this process started; an honest
+    # asyncio.sleep-based loop does not hold cadence exactly. The first few
+    # scans skip this: OPC UA's own session/subscription warm-up on the
+    # earliest reads is a one-time cost, not ongoing scheduler jitter, and
+    # would otherwise permanently dominate a running max that never resets.
+    JITTER_WARMUP_SCANS = 5
+    prev_loop_t0: float | None = None
+    max_jitter_ms = 0.0
+    scan_count = 0
+
     async with server:
         while True:
             loop_t0 = time.perf_counter()
+            scan_count += 1
+            if prev_loop_t0 is not None and scan_count > JITTER_WARMUP_SCANS:
+                period_ms = (loop_t0 - prev_loop_t0) * 1000.0
+                max_jitter_ms = max(max_jitter_ms, abs(period_ms - SCAN_PERIOD_S * 1000.0))
+            prev_loop_t0 = loop_t0
 
             # --- READ INPUTS (from OPC UA, i.e. from the DCS) ---
             sp_dv = await nodes["PID.SP"].read_data_value()
@@ -129,6 +147,7 @@ async def run(cfg: dict) -> None:
             await nodes["Interlock.Reason"].write_value(out.interlock_reason)
             await nodes["Status.Heartbeat"].write_value(ua.Variant(out.heartbeat, ua.VariantType.UInt32))
             await nodes["Status.ScanTime_ms"].write_value(out.scan_time_ms)
+            await nodes["Status.ScanJitter_ms"].write_value(max_jitter_ms)
 
             elapsed = time.perf_counter() - loop_t0
             sleep_s = max(0.0, SCAN_PERIOD_S - elapsed)

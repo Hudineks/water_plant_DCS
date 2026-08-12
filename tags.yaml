@@ -129,7 +129,24 @@ unit:
       type: float
       unit: ms
       access: R
-      description: Measured duration of the last scan cycle.
+      description: Measured wall-clock duration of the last scan's execute-logic
+        step only (physics integration, interlocks, flow-to-Pump.CMD conversion) --
+        not the surrounding OPC UA read/write, and not the same thing as the scan
+        *period* (see Status.ScanJitter_ms). Tenths of a millisecond in this
+        simulation; display with at least one decimal place, not rounded to whole ms.
+    Status.ScanJitter_ms:
+      type: float
+      unit: ms
+      access: R
+      description: Largest absolute deviation, since shortly after this process
+        started (the first few scans are excluded, see plc/unit.py's
+        JITTER_WARMUP_SCANS -- OPC UA's own session/subscription warm-up is a
+        one-time cost, not ongoing jitter), between the actual wall-clock time from
+        one scan's start to the next and the nominal 100 ms scan period
+        (SCAN_PERIOD_S). Status.ScanTime_ms alone cannot show this, since it
+        excludes the OPC UA I/O and the asyncio.sleep that fill out the rest of the
+        100 ms budget -- a Python sleep-based loop does not hold cadence exactly,
+        and this is the honest measure of how far it drifts.
 
 global:
   description: Plant-wide tags, not per-unit. Live on the DCS OPC UA presence (published via the DCS's own server-side status, consumed by the HMI).

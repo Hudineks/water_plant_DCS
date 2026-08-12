@@ -27,9 +27,25 @@ as a real PLC scan:
    `plc/tests/test_scan_engine.py` drives directly.
 3. **Write outputs** — every unit tag in `tags.yaml` is written back to its
    OPC UA node.
-4. Sleep out the remainder of the 100 ms budget (`Status.ScanTime_ms` reports
-   how long steps 1-3 actually took, it is sub-millisecond in this
-   simulation).
+4. Sleep out the remainder of the 100 ms budget.
+
+Two different numbers come out of this, and they answer different
+questions -- conflating them (as an earlier version of this file did) reads
+as "the scan takes 0 ms," which is nonsense:
+
+- **`Status.ScanTime_ms`** — how long step 2 alone took (pure Python, no
+  OPC UA I/O), tenths of a millisecond in this simulation. Measured with
+  `time.perf_counter()` inside `ScanEngine.scan()`. This is *execution
+  duration against the 100 ms cycle budget*, e.g. "0.4 / 100 ms": how much
+  of the budget got used.
+- **`Status.ScanJitter_ms`** — the largest deviation, since the process
+  started, between the real wall-clock time from one scan's start to the
+  next and the nominal 100 ms period. This is *cadence*, not duration: it
+  answers whether the loop actually holds 100 ms or drifts, which
+  `Status.ScanTime_ms` cannot show since it excludes the OPC UA I/O and
+  the `asyncio.sleep` that fill out the rest of the budget. A Python
+  sleep-based loop does not hold cadence exactly; this reports how far off
+  it runs instead of pretending it's exact.
 
 The physics integration step uses `dt_sim = SCAN_PERIOD_S * TIME_SCALE`, so
 `TIME_SCALE` speeds up how fast the simulated process moves without changing
@@ -70,7 +86,8 @@ Engineering units, matching tags.yaml:
 | Pump.CMD / FB | % | 0-100, no actuator lag modeled |
 | PID.SP | cm3/s | cascade flow setpoint from the DCS |
 | PID.OUT | % | commanded flow-to-percent output before the interlock zeroes it (equals Pump.CMD unless tripped) |
-| Status.ScanTime_ms | ms | measured duration of step 2-3 above |
+| Status.ScanTime_ms | ms | execution duration of step 2 above only (excludes OPC UA I/O), against the 100 ms cycle budget |
+| Status.ScanJitter_ms | ms | largest deviation of the real inter-scan period from 100 ms, since process start -- cadence, not duration, see "Scan structure" above |
 
 ## Regulatory layer ("PID" in name only)
 
