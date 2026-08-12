@@ -1,0 +1,127 @@
+# Address space contract for water_plant_DCS.
+#
+# This file is the single source of truth for every OPC UA node exposed by a
+# PLC unit. plc/, dcs/, and hmi/ all read this file. Do not add, rename, or
+# remove tags without updating this file first, since plantbus generates both
+# the server nodes and the client subscriptions from it.
+#
+# Namespace: each PLC unit runs its own OPC UA server. The unit identifier
+# (Unit1, Unit2, ...) is the server's own namespace root, not a prefix baked
+# into node names, so the same tag list applies to every unit.
+#
+# Access: R = client may read, RW = client may read and write.
+# The DCS is the only client allowed to write PID.SP. The HMI writes
+# APC.Enabled and, in manual mode, PID.SP for the unit under test.
+
+unit:
+  description: One process unit (one simulated tank + pump + valve + local PID).
+  tags:
+    Level.PV:
+      type: float
+      unit: m
+      access: R
+      description: Measured tank level.
+    Level.SP:
+      type: float
+      unit: m
+      access: R
+      description: Effective level setpoint currently used by the PID (local or cascade).
+    Level.HH:
+      type: float
+      unit: m
+      access: R
+      description: High-high level interlock threshold.
+    Level.LL:
+      type: float
+      unit: m
+      access: R
+      description: Low-low level interlock threshold.
+
+    Pump.CMD:
+      type: float
+      unit: percent
+      access: R
+      description: Pump command output from the PID (0-100).
+    Pump.FB:
+      type: float
+      unit: percent
+      access: R
+      description: Pump feedback, equals CMD in this simulation (no actuator lag modeled).
+    Pump.Running:
+      type: bool
+      access: R
+      description: Pump running status. False when tripped or commanded to zero.
+
+    Valve.CMD:
+      type: float
+      unit: percent
+      access: R
+      description: Outlet valve position command (disturbance input, not controlled by the PID).
+    Valve.FB:
+      type: float
+      unit: percent
+      access: R
+      description: Outlet valve feedback, equals CMD in this simulation.
+
+    PID.SP:
+      type: float
+      unit: m
+      access: RW
+      description: >
+        Cascade setpoint written by the DCS. The PLC only follows this value
+        in CASCADE mode. Written exclusively by the DCS/APC layer, never by
+        the HMI directly except when forcing a unit into MANUAL/local test.
+    PID.OUT:
+      type: float
+      unit: percent
+      access: R
+      description: PID controller output before actuator limits.
+    PID.Mode:
+      type: string
+      access: R
+      enum: [AUTO, MAN, CASCADE]
+      description: >
+        AUTO = PID follows its local setpoint. MAN = operator drives Pump.CMD
+        directly. CASCADE = PID follows PID.SP from the DCS. The PLC itself
+        demotes CASCADE to AUTO on a stale PID.SP watchdog trip.
+
+    Interlock.Trip:
+      type: bool
+      access: R
+      description: Latched safety trip. Requires manual reset at the PLC.
+    Interlock.Reason:
+      type: string
+      access: R
+      description: Human-readable reason for the last trip (HH level, LL level, dry run).
+
+    Status.Heartbeat:
+      type: uint
+      access: R
+      description: Free-running counter incremented once per PLC scan. Used by DCS/HMI to detect a dead unit.
+    Status.ScanTime_ms:
+      type: float
+      unit: ms
+      access: R
+      description: Measured duration of the last scan cycle.
+
+global:
+  description: Plant-wide tags, not per-unit. Live on the DCS OPC UA presence (published via the DCS's own server-side status, consumed by the HMI).
+  tags:
+    APC.Enabled:
+      type: bool
+      access: RW
+      description: Master on/off switch for the MPC layer. Written by the HMI.
+    APC.SolveTime_ms:
+      type: float
+      unit: ms
+      access: R
+      description: Wall-clock duration of the last MPC solve.
+    APC.Status:
+      type: string
+      access: R
+      enum: [OK, DEGRADED, SOLVER_FAIL, DISABLED]
+      description: >
+        OK = solving and writing setpoints normally. DEGRADED = one or more
+        units dropped from the optimization (dead heartbeat). SOLVER_FAIL =
+        last solve did not converge or exceeded its time budget, last good
+        setpoints held. DISABLED = APC.Enabled is false.

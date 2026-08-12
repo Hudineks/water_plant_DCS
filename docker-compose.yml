@@ -1,0 +1,84 @@
+# water_plant_DCS stack: 3 PLC units, 1 DCS (MPC/APC supervisory layer), 1 HMI.
+# `docker compose up` is the only command needed once plc/Dockerfile and
+# dcs/Dockerfile exist (both owned by other agents, see README.md in this
+# directory for the status of that integration at the time hmi/ was built).
+#
+# Build context: every service uses the water_plant_DCS/ root as its build
+# context (not its own subdirectory) with `dockerfile:` pointing at
+# <service>/Dockerfile. This is required, not a style choice: tags.yaml and
+# plantbus/ are the frozen contract every service's Dockerfile needs to COPY,
+# and Docker refuses to COPY anything from outside the build context. A
+# context scoped to plc/ (or hmi/) alone could not reach ../tags.yaml.
+#
+# Port convention (see OPEN_QUESTIONS.md for the parts of this that are
+# assumptions, not fixed by tags.yaml):
+#   - each plc-N container listens on OPCUA_PORT=4840 *inside its own
+#     container*; there is no conflict between units since each is a
+#     separate network namespace, they are reachable as plc-1:4840,
+#     plc-2:4840, plc-3:4840 on the water-plant network.
+#   - dcs listens on 4850 for its own OPC UA server (global APC.* tags),
+#     and separately connects out to all three plc-N endpoints as an
+#     OPC UA client.
+#   - hmi listens on 8080 for the operator panel (HTTP + websocket),
+#     published to the host so a browser can reach it.
+
+services:
+  plc-1:
+    build:
+      context: .
+      dockerfile: plc/Dockerfile
+    environment:
+      UNIT_ID: "1"
+      OPCUA_PORT: "4840"
+    networks: [water-plant]
+
+  plc-2:
+    build:
+      context: .
+      dockerfile: plc/Dockerfile
+    environment:
+      UNIT_ID: "2"
+      OPCUA_PORT: "4840"
+    networks: [water-plant]
+
+  plc-3:
+    build:
+      context: .
+      dockerfile: plc/Dockerfile
+    environment:
+      UNIT_ID: "3"
+      OPCUA_PORT: "4840"
+    networks: [water-plant]
+
+  dcs:
+    build:
+      context: .
+      dockerfile: dcs/Dockerfile
+    environment:
+      PLC_ENDPOINTS: "opc.tcp://plc-1:4840/,opc.tcp://plc-2:4840/,opc.tcp://plc-3:4840/"
+      DCS_SERVER_ENDPOINT: "opc.tcp://0.0.0.0:4850/"
+    depends_on:
+      - plc-1
+      - plc-2
+      - plc-3
+    networks: [water-plant]
+
+  hmi:
+    build:
+      context: .
+      dockerfile: hmi/Dockerfile
+    environment:
+      PLC_ENDPOINTS: "opc.tcp://plc-1:4840/,opc.tcp://plc-2:4840/,opc.tcp://plc-3:4840/"
+      DCS_ENDPOINT: "opc.tcp://dcs:4850/"
+    ports:
+      - "8080:8080"
+    depends_on:
+      - dcs
+      - plc-1
+      - plc-2
+      - plc-3
+    networks: [water-plant]
+
+networks:
+  water-plant:
+    driver: bridge

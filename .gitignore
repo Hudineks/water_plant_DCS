@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.db
+*.sqlite
+*.sqlite3
+.pytest_cache/
+.vscode/
+.idea/
+*.egg-info/

@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>water_plant_DCS - Operator Panel</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header id="topbar">
+  <div class="title">WATER_PLANT_DCS &mdash; OPERATOR PANEL</div>
+  <div class="apc-block">
+    <span class="label">APC</span>
+    <span id="apc-status" class="badge badge-unknown">UNKNOWN</span>
+    <span id="apc-solvetime" class="mono">SOLVE: --- ms</span>
+    <button id="apc-toggle" class="toggle-btn" disabled>APC ENABLE / DISABLE</button>
+    <span id="dcs-conn" class="badge badge-unknown">DCS: ---</span>
+  </div>
+  <div id="clock" class="mono"></div>
+</header>
+
+<main>
+  <section id="units" aria-label="unit mimic diagrams"></section>
+
+  <section id="alarms-panel">
+    <h2>ACTIVE ALARMS / TRIPS</h2>
+    <table id="alarms-table">
+      <thead><tr><th>UNIT</th><th>TYPE</th><th>DETAIL</th></tr></thead>
+      <tbody id="alarms-body"></tbody>
+    </table>
+  </section>
+</main>
+
+<footer id="statusbar">
+  <span id="ws-status" class="mono">WS: connecting...</span>
+  <span id="server-time" class="mono"></span>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>
