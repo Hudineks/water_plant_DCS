@@ -18,6 +18,16 @@ PLC actually publishes). It is genuinely useful for the HMI to show,
 though, so the DCS publishes it itself, per unit, under
 Unit{n}/Diagnostics/H1_Estimated on this server -- built directly here with
 a small ad hoc helper rather than routed through plantbus/tags.yaml.
+
+Control.CycleName / Control.ManualTargetM: also not in tags.yaml, for the
+same reason -- there is no per-unit "what setpoint source is this unit
+following" tag in the contract, only the single global APC.Enabled. These
+let the HMI pick a unit's setpoint source live (off / step / ramp /
+manual) instead of it being fixed at dcs/main.py startup. See
+dcs/main.py's control_loop for how it reads these each cycle, and
+dcs/README.md for why the global APC.Enabled/Status tags became a derived
+readout of these instead of an independent operator input once this
+existed.
 """
 from __future__ import annotations
 
@@ -31,12 +41,23 @@ DCS_SERVER_URI = "http://water-plant-dcs/dcs"
 
 
 class GlobalServer:
-    def __init__(self, endpoint: str, unit_ids: list[int] | None = None):
+    def __init__(
+        self,
+        endpoint: str,
+        unit_ids: list[int] | None = None,
+        unit_control_seed: dict[int, tuple[str, float]] | None = None,
+    ):
         self.endpoint = endpoint
         self.unit_ids = unit_ids or []
+        # unit_id -> (initial cycle_name, initial manual_target_m), written
+        # once at start() so a fresh process reproduces the configured
+        # default (see dcs/config.py's unit_setpoint_sources) without any
+        # HMI click, and is then live-changeable via these same nodes.
+        self.unit_control_seed = unit_control_seed or {}
         self._server: Server | None = None
         self.nodes: dict[str, Node] = {}
         self._diagnostic_nodes: dict[int, Node] = {}
+        self._control_nodes: dict[int, dict[str, Node]] = {}
 
     async def start(self) -> None:
         self._server = Server()
@@ -57,10 +78,19 @@ class GlobalServer:
 
         for unit_id in self.unit_ids:
             unit_object = await objects.add_object(idx, f"Unit{unit_id}")
+
             diag_object = await unit_object.add_object(idx, "Diagnostics")
-            node = await diag_object.add_variable(idx, "H1_Estimated", 0.0)
-            await node.set_writable(False)
-            self._diagnostic_nodes[unit_id] = node
+            diag_node = await diag_object.add_variable(idx, "H1_Estimated", 0.0)
+            await diag_node.set_writable(False)
+            self._diagnostic_nodes[unit_id] = diag_node
+
+            seed_cycle_name, seed_target_m = self.unit_control_seed.get(unit_id, ("off", 0.15))
+            control_object = await unit_object.add_object(idx, "Control")
+            cycle_node = await control_object.add_variable(idx, "CycleName", seed_cycle_name, varianttype=ua.VariantType.String)
+            await cycle_node.set_writable(True)
+            target_node = await control_object.add_variable(idx, "ManualTargetM", float(seed_target_m), varianttype=ua.VariantType.Double)
+            await target_node.set_writable(True)
+            self._control_nodes[unit_id] = {"CycleName": cycle_node, "ManualTargetM": target_node}
 
         await self._server.start()
 
@@ -71,7 +101,8 @@ class GlobalServer:
     async def read_enabled(self) -> bool:
         return bool(await self.nodes["APC.Enabled"].read_value())
 
-    async def publish_status(self, solve_time_ms: float, status: str) -> None:
+    async def publish_status(self, enabled: bool, solve_time_ms: float, status: str) -> None:
+        await self.nodes["APC.Enabled"].write_value(bool(enabled))
         await self.nodes["APC.SolveTime_ms"].write_value(float(solve_time_ms))
         await self.nodes["APC.Status"].write_value(status)
 
@@ -79,3 +110,14 @@ class GlobalServer:
         node = self._diagnostic_nodes.get(unit_id)
         if node is not None:
             await node.write_value(float(h1_estimated_m))
+
+    async def read_unit_control(self, unit_id: int) -> tuple[str, float]:
+        """Returns (cycle_name, manual_target_m) currently set for a unit,
+        read fresh each call (this is an operator-writable node, dcs/main.py
+        polls it once per control cycle to detect changes)."""
+        nodes = self._control_nodes.get(unit_id)
+        if nodes is None:
+            return "off", 0.15
+        cycle_name = str(await nodes["CycleName"].read_value())
+        target_m = float(await nodes["ManualTargetM"].read_value())
+        return cycle_name, target_m

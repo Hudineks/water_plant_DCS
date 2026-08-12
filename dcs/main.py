@@ -4,18 +4,27 @@ Runs three concurrent things:
   1. One UnitClient per PLC endpoint in PLC_ENDPOINTS (OPC UA client side,
      opc_client.py), each reconnecting on its own.
   2. One GlobalServer (global_server.py), the DCS's own OPC UA server
-     exposing APC.Enabled/SolveTime_ms/Status to the HMI.
-  3. The 1 s control loop below: read cached PV + heartbeat per unit, run
-     each unit's MPC in a worker thread (do-mpc/ipopt is blocking, not
-     async), write PID.SP for units that converged, hold the last SP for
-     units that did not, log everything to the historian.
+     exposing APC.Enabled/SolveTime_ms/Status (now a derived readout, see
+     below) plus each unit's live Control.CycleName/ManualTargetM and
+     Diagnostics.H1_Estimated.
+  3. The 1 s control loop below: read cached PV + heartbeat per unit, read
+     each unit's live setpoint-source selection, run each unit's MPC in a
+     worker thread (do-mpc/ipopt is blocking, not async) for units whose
+     selection isn't "off", write PID.SP for units that converged, hold
+     the last SP for units that did not, log everything to the historian.
 
-No tag exists in tags.yaml for an operator-entered APC target level (only
-PID.SP, which the DCS itself writes, and Level.SP, which is a PLC-reported
-value). Each unit's setpoint source (a cycle CSV for a real MPC horizon
-preview, or a fixed constant) comes from dcs/config.py's
-unit_setpoint_sources, defaulting to Unit1=step cycle, Unit2=ramp cycle,
-Unit3=constant. See OPEN_QUESTIONS.md.
+Per-unit setpoint source (cycle CSV for real MPC horizon preview, or a
+manual constant, or off) is operator-controlled at runtime via
+Control.CycleName/Control.ManualTargetM on the DCS's own OPC UA server
+(dcs/global_server.py), seeded at startup from dcs/config.py's
+unit_setpoint_sources so a fresh process reproduces the project's default
+demo (Unit1=step, Unit2=ramp, Unit3=manual) with no operator action
+needed. The global APC.Enabled/APC.Status/APC.SolveTime_ms tags are
+derived each cycle from the union of per-unit selections (true whenever at
+least one unit isn't "off") rather than being an independent operator
+input -- see dcs/README.md. No tag exists in tags.yaml for any of this
+(only PID.SP, which the DCS itself writes, and Level.SP, a PLC-reported
+value); see OPEN_QUESTIONS.md.
 """
 from __future__ import annotations
 
@@ -40,23 +49,38 @@ from dcs.watchdog import HeartbeatWatchdog
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("dcs.main")
 
+# Canonical cycle files offered by the HMI's Step/Ramp dropdown options.
+# Fixed paths, not configurable per unit anymore now that selection is
+# live -- DCS_UNIT{n}_CYCLE/_TARGET_M (dcs/config.py) still control each
+# unit's *initial* selection at startup, not which files exist to choose
+# from.
+CYCLE_FILES = {
+    "step": ROOT / "cycles" / "step_response.csv",
+    "ramp": ROOT / "cycles" / "ramp_response.csv",
+}
+
+
+def _seed_from_source(source) -> tuple[str, float]:
+    """Maps a dcs/config.py unit_setpoint_sources entry to the
+    (cycle_name, manual_target_m) pair GlobalServer seeds its Control
+    nodes with at startup."""
+    if isinstance(source, str):
+        name = Path(source).stem
+        if "step" in name:
+            return "step", 0.15
+        if "ramp" in name:
+            return "ramp", 0.15
+        return "manual", 0.15
+    return "manual", float(source)
+
 
 class UnitRuntime:
-    def __init__(self, unit_id: int, client: UnitClient, setpoint_source):
+    def __init__(self, unit_id: int, client: UnitClient):
         self.unit_id = unit_id
         self.client = client
-
-        if isinstance(setpoint_source, str):
-            cycle = SetpointCycle.from_csv(ROOT / setpoint_source)
-            self.constant_target_m: float | None = None
-            logger.info("Unit%d: setpoint source is cycle '%s' (period %.0fs)", unit_id, cycle.name, cycle.period_s)
-        else:
-            cycle = None
-            self.constant_target_m = float(setpoint_source)
-            logger.info("Unit%d: setpoint source is constant target %.3f m", unit_id, self.constant_target_m)
-
-        self.controller = UnitController(unit_id, cycle=cycle)
-        self.was_enabled = False
+        self.controller = UnitController(unit_id)
+        self.manual_target_m = 0.15
+        self.active = False
         self.last_solve_time_ms = 0.0
         self.last_converged = True
 
@@ -65,19 +89,23 @@ class UnitRuntime:
         For a cycle-driven unit this is only used for logging/fallback,
         the horizon preview itself comes from the cycle's own tvp_fun
         sampling (see controller_wrapper.py / mpc_core.py), not from this
-        single point."""
-        if self.constant_target_m is not None:
-            return self.constant_target_m
-        target = self.controller.current_cycle_target_m
-        return target if target is not None else 0.15
+        single point. For a manual unit it is the actual, only target."""
+        if self.controller.cycle is not None:
+            target = self.controller.current_cycle_target_m
+            if target is not None:
+                return target
+        return self.manual_target_m
 
 
-async def control_loop(cfg: Config, clients: list[UnitClient], global_server: GlobalServer, historian: Historian) -> None:
+async def control_loop(
+    cfg: Config,
+    clients: list[UnitClient],
+    global_server: GlobalServer,
+    historian: Historian,
+    cycles_by_name: dict[str, SetpointCycle],
+) -> None:
     watchdog = HeartbeatWatchdog(cfg.heartbeat_stall_cycles)
-    runtimes = [
-        UnitRuntime(i + 1, clients[i], cfg.unit_setpoint_sources[i + 1])
-        for i in range(len(clients))
-    ]
+    runtimes = [UnitRuntime(i + 1, clients[i]) for i in range(len(clients))]
     executor = ThreadPoolExecutor(max_workers=max(1, len(clients)), thread_name_prefix="mpc-solve")
 
     loop = asyncio.get_event_loop()
@@ -85,7 +113,6 @@ async def control_loop(cfg: Config, clients: list[UnitClient], global_server: Gl
     try:
         while True:
             cycle_start = time.monotonic()
-            enabled = await global_server.read_enabled()
 
             alive_runtimes = []
             for rt in runtimes:
@@ -99,14 +126,15 @@ async def control_loop(cfg: Config, clients: list[UnitClient], global_server: Gl
             solve_futures = {}
             for rt in alive_runtimes:
                 pv = rt.client.get_cached("Level.PV")
-                if pv is None:
-                    continue
 
-                if enabled and not rt.was_enabled:
-                    rt.controller.request_bumpless_reset()
-                rt.was_enabled = enabled
+                cycle_name, manual_target_m = await global_server.read_unit_control(rt.unit_id)
+                if cycle_name != rt.controller.cycle_name:
+                    logger.info("Unit%d: setpoint source changed to '%s'", rt.unit_id, cycle_name)
+                rt.controller.set_setpoint_source(cycle_name, cycles_by_name)
+                rt.manual_target_m = manual_target_m
+                rt.active = cycle_name != "off"
 
-                if not enabled:
+                if pv is None or not rt.active:
                     continue
 
                 ll_hh_future = rt.client.read_bounds()
@@ -151,22 +179,23 @@ async def control_loop(cfg: Config, clients: list[UnitClient], global_server: Gl
                 if snapshot:
                     historian.log_values(f"Unit{rt.unit_id}", snapshot)
 
-            solving_units = list(step_futures.keys())
-            if not enabled:
+            solving_units = set(step_futures.keys())
+            enabled_any = any(rt.active for rt in alive_runtimes)
+            if not enabled_any:
                 status = "DISABLED"
                 solve_time_ms = 0.0
             elif len(alive_runtimes) < len(runtimes):
                 status = "DEGRADED"
                 solve_time_ms = max((rt.last_solve_time_ms for rt in alive_runtimes), default=0.0)
-            elif any(not runtimes[i].last_converged for i in range(len(runtimes)) if runtimes[i].unit_id in solving_units):
+            elif any(not rt.last_converged for rt in alive_runtimes if rt.unit_id in solving_units):
                 status = "SOLVER_FAIL"
                 solve_time_ms = max((rt.last_solve_time_ms for rt in alive_runtimes), default=0.0)
             else:
                 status = "OK"
                 solve_time_ms = max((rt.last_solve_time_ms for rt in alive_runtimes), default=0.0)
 
-            await global_server.publish_status(solve_time_ms, status)
-            historian.log_values("Global", {"APC.Enabled": enabled, "APC.SolveTime_ms": solve_time_ms, "APC.Status": status})
+            await global_server.publish_status(enabled_any, solve_time_ms, status)
+            historian.log_values("Global", {"APC.Enabled": enabled_any, "APC.SolveTime_ms": solve_time_ms, "APC.Status": status})
 
             elapsed = time.monotonic() - cycle_start
             await asyncio.sleep(max(0.0, cfg.cycle_s - elapsed))
@@ -178,8 +207,14 @@ async def main() -> None:
     cfg = load_config()
     logger.info("Starting DCS: %d units, cycle=%.1fs, server=%s", len(cfg.plc_endpoints), cfg.cycle_s, cfg.dcs_server_endpoint)
 
+    cycles_by_name = {name: SetpointCycle.from_csv(path) for name, path in CYCLE_FILES.items()}
+
     unit_ids = list(range(1, len(cfg.plc_endpoints) + 1))
-    global_server = GlobalServer(cfg.dcs_server_endpoint, unit_ids=unit_ids)
+    unit_control_seed = {
+        unit_id: _seed_from_source(cfg.unit_setpoint_sources.get(unit_id, 0.15))
+        for unit_id in unit_ids
+    }
+    global_server = GlobalServer(cfg.dcs_server_endpoint, unit_ids=unit_ids, unit_control_seed=unit_control_seed)
     await global_server.start()
 
     historian = Historian(cfg.historian_db_path)
@@ -191,7 +226,7 @@ async def main() -> None:
     client_tasks = [asyncio.create_task(c.run()) for c in clients]
 
     try:
-        await control_loop(cfg, clients, global_server, historian)
+        await control_loop(cfg, clients, global_server, historian, cycles_by_name)
     finally:
         for c in clients:
             await c.stop()

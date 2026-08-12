@@ -69,17 +69,6 @@ body {
 .badge-bad { color: var(--bad); border-color: var(--bad); }
 .badge-unknown { color: var(--unknown); border-color: var(--unknown); }
 
-.toggle-btn {
-  font-family: inherit;
-  background: #1c242c;
-  color: var(--text);
-  border: 1px solid var(--panel-border);
-  padding: 4px 10px;
-  cursor: pointer;
-}
-.toggle-btn:hover:not(:disabled) { border-color: var(--accent); }
-.toggle-btn:disabled { color: var(--text-dim); cursor: not-allowed; }
-
 #clock { color: var(--text-dim); margin-left: 8px; }
 
 main {
@@ -123,6 +112,26 @@ main {
   margin-bottom: 8px;
 }
 
+.tank-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0;
+}
+
+.pump-glyph {
+  width: 18px;
+  height: 18px;
+  border: 1px solid var(--panel-border);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  color: var(--text-dim);
+  margin-bottom: 2px;
+}
+
 .tank {
   width: 60px;
   height: 90px;
@@ -132,12 +141,29 @@ main {
   justify-self: center;
 }
 
+.tank-upper {
+  width: 46px;
+  height: 40px;
+  border: 1px dashed var(--panel-border);
+}
+
+.pipe-connector {
+  width: 3px;
+  height: 8px;
+  background: var(--panel-border);
+}
+
 .tank-fill {
   position: absolute;
   bottom: 0;
   left: 0;
   right: 0;
   background: var(--accent);
+}
+
+.tank-fill-dim {
+  background: var(--text-dim);
+  opacity: 0.6;
 }
 
 .tank-sp-line {
@@ -167,15 +193,15 @@ main {
   display: block;
 }
 
-.sp-row {
+.sp-row, .cycle-row {
   display: flex;
   gap: 6px;
   align-items: center;
   margin-top: 8px;
+  flex-wrap: wrap;
 }
 
-.sp-row input {
-  width: 70px;
+.sp-row input, .cycle-row input, .cycle-row select {
   font-family: inherit;
   background: #0c1114;
   color: var(--text);
@@ -183,7 +209,18 @@ main {
   padding: 3px 5px;
 }
 
-.sp-row button {
+.sp-row input { width: 70px; }
+.cycle-row input { width: 60px; }
+.cycle-row select { width: 82px; }
+
+.sp-row input:disabled, .cycle-row input:disabled, .cycle-row select:disabled {
+  color: var(--text-dim);
+  border-color: var(--panel-border);
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.sp-row button, .cycle-row button {
   font-family: inherit;
   background: #1c242c;
   color: var(--text);
@@ -191,7 +228,14 @@ main {
   padding: 3px 8px;
   cursor: pointer;
 }
-.sp-row button:hover { border-color: var(--accent); }
+.sp-row button:hover:not(:disabled), .cycle-row button:hover:not(:disabled) { border-color: var(--accent); }
+.sp-row button:disabled, .cycle-row button:disabled { color: var(--text-dim); cursor: not-allowed; }
+
+.hint {
+  color: var(--text-dim);
+  font-size: 10px;
+  flex-basis: 100%;
+}
 
 .mode-tag {
   font-family: "Consolas", "Courier New", monospace;

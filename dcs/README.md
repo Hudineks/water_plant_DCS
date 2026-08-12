@@ -81,30 +81,49 @@ see `OPEN_QUESTIONS.md` for exactly what and why. The model, objective,
 constraints, and solver settings from `build_model()`/`build_mpc()`/
 `build_ekf()` are untouched.
 
-## Per-unit setpoint source: cycles vs a constant target
+## Per-unit setpoint source: live-selectable, off / step / ramp / manual
 
-`dcs/config.py`'s `unit_setpoint_sources` gives each unit either a
-`cycles.loader.SetpointCycle` (a CSV path) or a plain constant float,
-defaulting to Unit1=`cycles/step_response.csv`, Unit2=`cycles/ramp_response.csv`,
-Unit3=a constant (0.15 m). Override with `DCS_UNIT{n}_CYCLE=<path>` or
-`DCS_UNIT{n}_TARGET_M=<value>` per unit.
+Each unit's setpoint source is operator-selectable at runtime, not fixed
+at process startup. `dcs/global_server.py` exposes
+`Unit{n}/Control/CycleName` (`"off" | "step" | "ramp" | "manual"`) and
+`Unit{n}/Control/ManualTargetM` on the DCS's own OPC UA server (not in
+tags.yaml, see the `Diagnostics.H1_Estimated` section below for the same
+precedent). `dcs/main.py`'s `control_loop` reads both once per control
+cycle (`GlobalServer.read_unit_control`) and calls
+`UnitController.set_setpoint_source(cycle_name, cycles_by_name)`, which is
+a no-op if the selection hasn't changed and otherwise swaps the active
+`cycles.loader.SetpointCycle` (or clears it for `"off"`/`"manual"`) and
+triggers a bumpless reset (see below). `"off"` means this unit is skipped
+entirely that cycle (no solve, no `PID.SP` write) -- exactly like the old
+global-disabled path, just per-unit now.
 
-For a cycle-driven unit, `UnitController.__init__` calls
-`controller.set_cycle(cycle)`, which is what actually matters here: it
-makes `_tvp_fun_mpc` sample the cycle across the MPC's full solve horizon
-instead of broadcasting one flat value, giving the solver a genuine
-preview of a setpoint change before it happens (ported from the original
-rig's `load_cycle_to_mpc`/`tvp_fun`). The `target_level_m` passed into
+These nodes are *seeded* once at `GlobalServer.start()` from
+`dcs/config.py`'s `unit_setpoint_sources` (still configured via
+`DCS_UNIT{n}_CYCLE`/`DCS_UNIT{n}_TARGET_M`, see Environment variables
+below), so a fresh process reproduces the project's default demo
+(Unit1=step, Unit2=ramp, Unit3=manual) with zero operator action needed --
+the HMI's per-unit CYCLE dropdown just makes that live-changeable
+afterward instead of fixed for the process's lifetime.
+
+For a cycle-driven unit, the active `SetpointCycle` makes `_tvp_fun_mpc`
+sample it across the MPC's full solve horizon instead of broadcasting one
+flat value, giving the solver a genuine preview of a setpoint change
+before it happens (ported from the original rig's
+`load_cycle_to_mpc`/`tvp_fun`). The `target_level_m` passed into
 `UnitController.step()` for a cycle-driven unit is only the *current*
 instantaneous cycle value (`UnitController.current_cycle_target_m`), used
 for the wrapper's own bookkeeping/fallback; the actual anticipatory
 behavior comes from the horizon sampling, not from this single point. For
-Unit 3 (no cycle), `step()`'s `target_level_m` behaves exactly as before:
-a flat target the MPC treats as constant across its whole horizon.
+a `"manual"` unit, `target_level_m` is `Control.ManualTargetM`, read fresh
+each cycle, and the MPC treats it as a flat target across its whole
+horizon (same math as the old fixed-constant-per-unit behavior, just
+live-editable now).
 
 `reset_to_measurement()` (bumpless transfer, see below) also resets a
-cycle's phase to t=0, so re-enabling APC always restarts a unit's cycle
-from the beginning rather than resuming at a stale offset.
+cycle's phase to t=0, so switching what a unit is tracking (including
+`"off"` -> anything, which is exactly when the HMI's per-unit CYCLE
+dropdown is used to resume control) always restarts that unit's cycle
+phase from the beginning rather than resuming at a stale offset.
 
 ## Diagnostics.H1_Estimated
 
@@ -121,17 +140,27 @@ ad hoc helper next to `Global/APC/*`, not routed through
 
 ## Mode handling and bumpless transfer
 
-- `APC.Enabled` is read from the DCS's own OPC UA server every control
-  cycle (`global_server.read_enabled()`).
-- On the cycle where a unit's `APC.Enabled` transitions False -> True,
-  `UnitController.request_bumpless_reset()` is called, which makes the next
+`APC.Enabled` is **derived**, not an independent operator input anymore:
+`dcs/main.py` computes `enabled_any = any(unit's cycle_name != "off")`
+each control cycle and publishes that to `Global/APC/Enabled` itself
+(`GlobalServer.publish_status(enabled, solve_time_ms, status)`). Writing
+`APC.Enabled` directly (the old `write_apc_enabled`/`/api/apc/enabled`
+path, kept for API compatibility) has no lasting effect: the DCS
+overwrites it with the derived value on the very next cycle. The real
+per-unit on/off control is `Control.CycleName` (see above); this changed
+once per-unit selection existed; the tag itself stays in tags.yaml
+unmodified.
+
+- `UnitController.set_setpoint_source()` calls `request_bumpless_reset()`
+  whenever a unit's selection actually changes, which makes the next
   `step()` call `reset_to_measurement()` on the underlying controller with
   the unit's current `Level.PV` before solving. This seeds the MPC/EKF
-  internal state at the real plant level so the first `PID.SP` it writes is
-  close to the measurement, not a jump toward the far-away target (see
-  `dcs/tests/test_bumpless_transfer.py`).
-- While `APC.Enabled` is False, `dcs/` does not solve or write `PID.SP` for
-  any unit, and `APC.Status` reads `DISABLED`.
+  internal state at the real plant level so the first `PID.SP` it writes
+  after a change is close to the measurement, not a jump toward the
+  far-away target (see `dcs/tests/test_bumpless_transfer.py`).
+- A unit whose `Control.CycleName` is `"off"` is skipped entirely that
+  cycle: no solve, no `PID.SP` write. If every unit is `"off"`,
+  `APC.Status` reads `DISABLED`.
 - When a unit's MPC does not converge (do-mpc/ipopt raised, see
   `MPCResult.converged`) or its solve is still running when the cycle's
   solve budget (`DCS_SOLVE_BUDGET_S`, default 2.0 s) elapses, `dcs/` holds

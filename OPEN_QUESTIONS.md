@@ -281,3 +281,51 @@ do-mpc solves take roughly `N * ~0.35 s` wall time under this environment
 so 3 units cost ~1.05 s, comfortably exceeding an 0.8 s budget and
 triggering `SOLVER_FAIL`/hold-last-SP almost every cycle. Fixed by
 changing the fallback to `"2.0"` to match the documented default.
+
+## hmi/: per-unit live cycle control replaces the single global APC.Enabled switch (2026-08-12)
+
+Running the stack standalone (no Docker), the operator reported two real
+problems: no way to enable/disable or pick a setpoint source per unit
+(only one global `APC.Enabled` toggle existed), and the manual-SP input
+field lost whatever was typed into it before the write could be
+submitted.
+
+The second one was a real, separate bug: `hmi/static/app.js`'s `render()`
+fully replaces `#units`' `innerHTML` on every websocket push (~1/s), which
+destroys and recreates every `<input>`, so anything the operator had
+started typing was gone before they could click WRITE. Fixed with
+`captureFocusedInput()`/`restoreFocusedInput()`: before a rebuild, save
+the currently-focused element's identifying `data-*` attribute, value, and
+cursor position; after rebuilding, reapply them to the matching new
+element. General enough to cover the manual-SP box, the new manual-target
+field, and the new cycle `<select>`.
+
+The first is a real missing feature, not a bug, resolved by adding
+`Unit{n}/Control/CycleName` (`"off"|"step"|"ramp"|"manual"`) and
+`Control/ManualTargetM` to `dcs/global_server.py` (same not-in-tags.yaml
+precedent as `Diagnostics.H1_Estimated`). The operator picked the model:
+one dropdown per unit instead of a separate "APC enabled" concept, with
+the existing global `APC.Enabled`/`APC.Status` becoming a *derived*
+readout (`dcs/main.py`: true whenever at least one unit isn't `"off"`)
+instead of an independent input. Writing `APC.Enabled` directly (the old
+path) still exists for compatibility but has no lasting effect since the
+DCS overwrites it with the derived value every cycle. See
+`dcs/README.md`'s "Per-unit setpoint source" and "Mode handling" sections
+for the full mechanism, and `hmi/README.md` for the new
+`/api/units/{id}/cycle` endpoint.
+
+The manual-SP box is now gated (disabled unless a unit's `CycleName` is
+`"off"`) instead of silently getting overwritten by the DCS within ~1 s,
+which is what the operator was actually hitting before ("i když to
+stihnu tak se to nezapíše" -- the write did land, CASCADE mode was
+correctly re-writing `PID.SP` from the active cycle every cycle, which
+looked indistinguishable from "the write didn't work"). Verified live:
+setting a unit's cycle to `"off"` then writing a manual SP now holds
+(`PID.Mode` stays `CASCADE`, `PID.SP` stops moving) instead of being
+overwritten on the next DCS cycle.
+
+The tank1/upstream visualization request was addressed by extending the
+mimic diagram to a two-tank stack (dashed, dim-filled upstream tank using
+the already-wired `H1 (est.)` value, connected by a pipe glyph to the
+existing downstream tank) rather than adding a new field -- the value was
+already on the panel as text, just not drawn.

@@ -10,14 +10,15 @@ flow_cm3s is not used at all here.
 
 Instead, after every controller.step() call, do-mpc has already stored the
 predicted state trajectory for the horizon it just solved
-(controller.mpc.data.prediction(('_x', 'h2'))). Index 1 of that array is the
-model's prediction of the controlled level one t_step (1 s, matching our
-cycle time) into the future under the optimal input sequence it just found.
-That single point is converted from cm to m and written as the next
-PID.SP. This gives the PLC's local PID loop a setpoint trajectory shaped by
-the MPC's horizon (it moves the SP gradually toward the operator target
-along the path the MPC computed) instead of slamming the full target in one
-step, while still never writing to Pump.CMD/Valve.CMD directly.
+(controller.mpc.data.prediction(('_x', 'h2'))). Index PREDICTION_HORIZON_INDEX
+of that array (see that constant's own comment for why it isn't 1) is the
+model's prediction of the controlled level that many seconds into the
+future under the optimal input sequence it just found. That single point
+is converted from cm to m and written as the next PID.SP. This gives the
+PLC's local PID loop a setpoint trajectory shaped by the MPC's horizon (it
+moves the SP toward the operator target along the path the MPC computed)
+instead of slamming the full target in one step, while still never
+writing to Pump.CMD directly.
 """
 from __future__ import annotations
 
@@ -125,16 +126,19 @@ class UnitController:
     unit's controller in its own worker thread.
     """
 
-    def __init__(self, unit_id: int, level_ll_m: float = 0.0, level_hh_m: float = 9.0, cycle=None):
+    def __init__(self, unit_id: int, level_ll_m: float = 0.0, level_hh_m: float = 9.0):
         self.unit_id = unit_id
         self.controller = _PortedWaterTankController()
         self.last_sp_m: float | None = None
         self.needs_bumpless_reset = True
         self.level_ll_m = level_ll_m
         self.level_hh_m = level_hh_m
-        self.cycle = cycle
-        if cycle is not None:
-            self.controller.set_cycle(cycle)
+        self.cycle = None
+        # None means "not yet told what to run" -- distinct from "off",
+        # so the first real value read from Control.CycleName (even "off")
+        # is applied via set_setpoint_source() instead of being skipped as
+        # a no-op change. See dcs/main.py's control_loop.
+        self.cycle_name: str | None = None
 
     @property
     def current_cycle_target_m(self) -> float | None:
@@ -147,8 +151,31 @@ class UnitController:
             return None
         return self.cycle.value_at(self.controller._t_now_s) / 100.0
 
+    def set_setpoint_source(self, cycle_name: str, cycles: dict[str, object]) -> None:
+        """Switch which setpoint source drives this unit: cycle_name is one
+        of "off" / "step" / "ramp" / "manual" (see
+        dcs/global_server.py's Control.CycleName). `cycles` maps "step"/
+        "ramp" to preloaded SetpointCycle instances; "off"/"manual" have no
+        cycle object (None), the difference between them is handled by the
+        caller (main.py skips solving entirely for "off").
+
+        No-op if the source hasn't changed since the last call, so a
+        steady selection doesn't reset every control cycle. Changing the
+        source triggers a bumpless reset, since switching from tracking
+        one trajectory to another (or to/from manual) is exactly the kind
+        of transition reset_to_measurement() exists to smooth.
+        """
+        if cycle_name == self.cycle_name:
+            return
+        self.cycle_name = cycle_name
+        self.cycle = cycles.get(cycle_name)
+        self.controller.set_cycle(self.cycle)
+        self.request_bumpless_reset()
+
     def request_bumpless_reset(self) -> None:
-        """Call when APC.Enabled transitions False -> True for this unit."""
+        """Call when a unit starts being solved again: APC.Enabled
+        transitions False -> True (legacy global path) or, per-unit, when
+        set_setpoint_source() changes what this unit is tracking."""
         self.needs_bumpless_reset = True
 
     def _clip_to_interlock_bounds(self, sp_m: float, level_hh_m: float, level_ll_m: float) -> float:

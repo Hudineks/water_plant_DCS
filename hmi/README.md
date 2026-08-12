@@ -39,18 +39,32 @@ setpoints. Port 8080.
   sends it to every open websocket. There is no polling from the browser
   side and no per-client OPC UA connection; the browser only ever speaks
   JSON over `ws://.../ws`.
-- Operator actions (manual setpoint write, APC on/off) go the other way:
-  the browser POSTs to `/api/units/{id}/setpoint` or `/api/apc/enabled`,
-  `hmi/main.py` calls `PlantState.write_unit_setpoint`/`write_apc_enabled`,
-  which write directly to the OPC UA node the bridge already resolved (no
-  extra browse per write). A write against a disconnected source returns
-  HTTP 409 with an error message instead of silently doing nothing.
+- Operator actions go the other way: the browser POSTs to
+  `/api/units/{id}/setpoint` (raw manual `PID.SP` write, only meaningful
+  while that unit's cycle is `"off"`, see below), `/api/units/{id}/cycle`
+  (sets `Control.CycleName`/`Control.ManualTargetM`, dcs/main.py's
+  `control_loop` picks this up within ~1 s), or the now largely-vestigial
+  `/api/apc/enabled` (kept for compatibility; `dcs/main.py` overwrites
+  `APC.Enabled` with its own derived value every cycle regardless of what's
+  written, see `dcs/README.md`'s "Mode handling" section). `hmi/main.py`
+  calls the matching `PlantState.write_*` method, which writes directly to
+  the OPC UA node the bridge already resolved (no extra browse per write).
+  A write against a disconnected source returns HTTP 409 with an error
+  message instead of silently doing nothing.
 - The frontend (`hmi/static/`) is plain HTML/CSS/JS: one `index.html`, one
   `style.css` (dense, monospace, no gradients/animation, per the operator-
   panel brief), one `app.js` that opens the websocket, renders unit mimic
-  cards (tank fill bar + numeric readouts + a 10-minute PV/SP trend drawn
-  as an inline SVG polyline, no charting library), the alarms table, and
-  the APC toggle/status.
+  cards (a two-tank stack -- H1 estimated/upstream above H2
+  measured/downstream, connected by a pipe glyph -- numeric readouts, a
+  10-minute PV/SP trend drawn as an inline SVG polyline with axis labels
+  and active-cycle shading, no charting library), a per-unit CYCLE
+  dropdown (off/step/ramp/manual) plus manual-target field, the manual-SP
+  box (disabled unless CYCLE is off), and the alarms table.
+  `render()` fully rebuilds each unit card's DOM on every websocket push
+  (~1/s); `captureFocusedInput()`/`restoreFocusedInput()` save and reapply
+  focus, value, and cursor position across that rebuild for any input the
+  operator is actively using, since a plain rebuild would otherwise
+  destroy whatever they're mid-typing before they can submit it.
 
 ## Environment variables
 

@@ -138,4 +138,23 @@ async def set_apc_enabled(req: ApcEnabledRequest):
     return {"ok": True}
 
 
+class CycleRequest(BaseModel):
+    name: str  # "off" | "step" | "ramp" | "manual"
+    target_m: float | None = None
+
+
+@app.post("/api/units/{unit_id}/cycle")
+async def set_unit_cycle(unit_id: int, req: CycleRequest):
+    """Sets a unit's live setpoint source. See dcs/global_server.py's
+    Control.CycleName/ManualTargetM and dcs/main.py's control_loop for how
+    the DCS picks this up (within one control cycle, ~1 s)."""
+    if req.name not in ("off", "step", "ramp", "manual"):
+        return JSONResponse({"ok": False, "error": f"unknown cycle name '{req.name}'"}, status_code=400)
+    try:
+        await state.write_unit_cycle(unit_id, req.name, req.target_m)
+    except RuntimeError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=409)
+    return {"ok": True}
+
+
 app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")

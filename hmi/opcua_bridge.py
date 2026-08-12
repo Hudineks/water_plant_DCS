@@ -44,7 +44,7 @@ class UnitState:
     values: dict = field(default_factory=dict)
     last_heartbeat: object = None
     last_heartbeat_change: float = 0.0
-    history: deque = field(default_factory=deque)  # (t, Level.PV, Level.SP)
+    history: deque = field(default_factory=deque)  # (t, Level.PV, Level.SP, cycle_name)
     error: str = ""
 
     @property
@@ -77,6 +77,11 @@ class DcsState:
     # real rig's upstream tank has no sensor, this is the DCS's own EKF
     # estimate, published diagnostically for the operator panel only.
     diagnostics: dict = field(default_factory=dict)
+    # unit_id -> {"cycle_name": str, "manual_target_m": float}. Also not in
+    # tags.yaml, see dcs/global_server.py's Unit{n}/Control/CycleName and
+    # Control/ManualTargetM: the operator-writable per-unit setpoint
+    # source selection (off/step/ramp/manual).
+    unit_control: dict = field(default_factory=dict)
     error: str = ""
 
     def snapshot(self) -> dict:
@@ -84,6 +89,7 @@ class DcsState:
             "connected": self.connected,
             "values": self.values,
             "diagnostics": self.diagnostics,
+            "unit_control": self.unit_control,
             "error": self.error,
         }
 
@@ -102,6 +108,7 @@ class PlantState:
         self.dcs = DcsState(endpoint=dcs_endpoint)
         self._unit_write_nodes: dict[int, dict] = {}
         self._dcs_write_nodes: dict = {}
+        self._unit_control_write_nodes: dict[int, dict] = {}
         self.on_change = None  # set by main.py to trigger a websocket push
 
     def snapshot(self) -> dict:
@@ -122,6 +129,18 @@ class PlantState:
         if node is None:
             raise RuntimeError("DCS not connected, cannot write APC.Enabled")
         await node.write_value(bool(enabled))
+
+    async def write_unit_cycle(self, unit_id: int, cycle_name: str, target_m: float | None = None):
+        """Sets a unit's live setpoint source (dcs/global_server.py's
+        Control.CycleName), and its manual target when given. dcs/main.py
+        picks this up within one control cycle (~1 s) and applies it,
+        including a bumpless reset if the source actually changed."""
+        nodes = self._unit_control_write_nodes.get(unit_id)
+        if not nodes:
+            raise RuntimeError(f"Unit{unit_id} control not connected, cannot set cycle")
+        await nodes["CycleName"].write_value(str(cycle_name))
+        if target_m is not None:
+            await nodes["ManualTargetM"].write_value(float(target_m))
 
 
 async def _find_child_object(client: Client, label: str):
@@ -159,7 +178,8 @@ async def _poll_unit(state: PlantState, unit_id: int):
                         unit.last_heartbeat_change = now
 
                     unit.values = values
-                    unit.history.append((time.time(), values.get("Level.PV"), values.get("Level.SP")))
+                    cycle_name = state.dcs.unit_control.get(unit_id, {}).get("cycle_name", "off")
+                    unit.history.append((time.time(), values.get("Level.PV"), values.get("Level.SP"), cycle_name))
                     cutoff = time.time() - HISTORY_WINDOW_S
                     while unit.history and unit.history[0][0] < cutoff:
                         unit.history.popleft()
@@ -192,22 +212,34 @@ async def _poll_dcs(state: PlantState):
                 logger.info("DCS connected at %s", dcs.endpoint)
 
                 diag_nodes: dict[int, object] = {}
+                control_read_nodes: dict[int, dict] = {}
                 for unit_id in state.units:
                     try:
                         unit_object = await _find_child_object(client, f"Unit{unit_id}")
-                        diag_object = await unit_object.get_child(
-                            f"{unit_object.nodeid.NamespaceIndex}:Diagnostics"
-                        )
-                        diag_nodes[unit_id] = await diag_object.get_child(
-                            f"{diag_object.nodeid.NamespaceIndex}:H1_Estimated"
-                        )
+                        idx = unit_object.nodeid.NamespaceIndex
+
+                        diag_object = await unit_object.get_child(f"{idx}:Diagnostics")
+                        diag_nodes[unit_id] = await diag_object.get_child(f"{idx}:H1_Estimated")
+
+                        control_object = await unit_object.get_child(f"{idx}:Control")
+                        cycle_node = await control_object.get_child(f"{idx}:CycleName")
+                        target_node = await control_object.get_child(f"{idx}:ManualTargetM")
+                        control_read_nodes[unit_id] = {"CycleName": cycle_node, "ManualTargetM": target_node}
+                        state._unit_control_write_nodes[unit_id] = control_read_nodes[unit_id]
                     except UaError:
-                        pass  # diagnostic node not published for this unit, skip it
+                        pass  # diagnostic/control nodes not published for this unit, skip it
 
                 while True:
                     dcs.values = await read_all(nodes)
                     dcs.diagnostics = {
                         uid: await node.read_value() for uid, node in diag_nodes.items()
+                    }
+                    dcs.unit_control = {
+                        uid: {
+                            "cycle_name": await cn["CycleName"].read_value(),
+                            "manual_target_m": await cn["ManualTargetM"].read_value(),
+                        }
+                        for uid, cn in control_read_nodes.items()
                     }
                     if state.on_change:
                         state.on_change()
@@ -217,6 +249,7 @@ async def _poll_dcs(state: PlantState):
             dcs.connected = False
             dcs.error = str(exc) or type(exc).__name__
             state._dcs_write_nodes = {}
+            state._unit_control_write_nodes = {}
             logger.warning("DCS disconnected (%s), retrying in %ss", dcs.error, RECONNECT_BACKOFF_S)
             if state.on_change:
                 state.on_change()
