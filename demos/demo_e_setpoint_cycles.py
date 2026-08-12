@@ -10,17 +10,18 @@ Unit 1 and Unit 2's controllers get a real preview of the setpoint
 trajectory across their solve horizon (see
 reference/water_mpc/mpc_core.py's set_cycle), not just today's error.
 
-Runtime note: the two example cycles run at their original real-world pace
-(step_response.csv has a 10 minute period, ramp_response.csv 13 minutes).
-This script runs for RUN_S seconds (default 300s / 5 minutes) at real
-pace, long enough to show the step cycle's first transition (flat at 8 cm
-until t=3.32min=199.2s, then a step to 14 cm) and the ramp cycle climbing
-through its equivalent segment, without waiting out a full period. Raise
-RUN_S to see more of the cycle, or set TIME_SCALE below 1.0's default to
-change the physical plant's own settling speed -- but note that speeding
-the plant up more than the cycle relative to real time makes MPC's
-lookahead advantage less visible, since a fast-settling plant does not lag
-behind a slow setpoint change even without preview.
+Runtime note: both example cycles have a 4 minute period (step_response.csv:
+flat at 5 cm for 2 min, step to 10 cm for ~1 min, back to 5 cm; ramp_response.csv:
+0 cm -> 15 cm over 2 min, back down over the next 2 min), so this script's
+default RUN_S=300s (5 minutes) comfortably covers a full period of both,
+including the step transition around t=2min and the anticipatory PID.SP
+rise the MPC starts well before that (its horizon is 40s, so watch it lead
+the step by about that much). Raise RUN_S to watch more than one period,
+or set TIME_SCALE below 1.0's default to change the physical plant's own
+settling speed -- but note that speeding the plant up more than the cycle
+relative to real time makes MPC's lookahead advantage less visible, since
+a fast-settling plant does not lag behind a setpoint change even without
+preview.
 
 Usage:
     python demos/demo_e_setpoint_cycles.py
@@ -114,12 +115,12 @@ def main():
                 print(f"[demo_e] t={elapsed:6.1f}s  not ready yet ({exc})")
             time.sleep(POLL_PERIOD_S)
 
-        print("[demo_e] done. Expected: Unit1's PID.SP stays near 0.08 m until")
-        print("[demo_e] t~=199s then moves toward 0.14 m ahead of a plain reactive")
-        print("[demo_e] controller, because the MPC previewed the step across its")
-        print("[demo_e] solve horizon (see reference/water_mpc/mpc_core.py's")
-        print("[demo_e] set_cycle). Unit2's SP should move smoothly along the ramp.")
-        print("[demo_e] Unit3's SP should stay flat at its constant target the whole run.")
+        print("[demo_e] done. Expected: Unit1's PID.SP starts near 0.05 m and rises")
+        print("[demo_e] toward 0.10 m well before t=120s (the step), because the MPC")
+        print("[demo_e] previewed it across its ~40s solve horizon (see")
+        print("[demo_e] reference/water_mpc/mpc_core.py's set_cycle) ahead of a plain")
+        print("[demo_e] reactive controller. Unit2's SP should move smoothly along the")
+        print("[demo_e] 0->0.15m->0 ramp. Unit3's SP should hold its manual target.")
     finally:
         dcs_proc.terminate()
         for p in plc_procs.values():

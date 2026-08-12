@@ -13,36 +13,33 @@ CYCLES_DIR = Path(__file__).resolve().parent.parent
 
 def test_step_response_parses():
     cycle = SetpointCycle.from_csv(CYCLES_DIR / "step_response.csv")
-    assert cycle.period_s == 10.0 * 60.0
-    assert len(cycle.rows) == 5
-    assert cycle.rows[0] == (0.0, 8.0)
-    assert cycle.rows[-1] == (6.66 * 60.0, 8.0)
+    assert cycle.period_s == 4.0 * 60.0
+    assert len(cycle.rows) == 6
+    assert cycle.rows[0] == (0.0, 5.0)
+    assert cycle.rows[-1] == (3.99 * 60.0, 5.0)
 
 
 def test_ramp_response_parses():
     cycle = SetpointCycle.from_csv(CYCLES_DIR / "ramp_response.csv")
-    assert cycle.period_s == 13.0 * 60.0
-    assert len(cycle.rows) == 4
+    assert cycle.period_s == 4.0 * 60.0
+    assert len(cycle.rows) == 3
 
 
 def test_step_value_at_holds_between_steps():
     cycle = SetpointCycle.from_csv(CYCLES_DIR / "step_response.csv")
-    # Flat at 8.0 cm from t=0 to just before the step at t=3.32min.
-    assert cycle.value_at(0.0) == 8.0
-    assert cycle.value_at(60.0) == 8.0
-    # Flat at 14.0 cm from t=3.33min to t=6.65min.
-    assert cycle.value_at(4.0 * 60.0) == 14.0
+    # Flat at 5.0 cm from t=0 to just before the step at t=2.0min.
+    assert cycle.value_at(0.0) == 5.0
+    assert cycle.value_at(60.0) == 5.0
+    # Flat at 10.0 cm from t=2.01min to t=3.0min.
+    assert cycle.value_at(2.5 * 60.0) == 10.0
 
 
 def test_ramp_value_at_interpolates_linearly():
     cycle = SetpointCycle.from_csv(CYCLES_DIR / "ramp_response.csv")
-    # Ramp rows: (0,8) (3.33min,8) (6.66min,14) (10min,8) -- midpoint of the
-    # 3.33min -> 6.66min segment should be the linear midpoint.
-    t_start = 3.33 * 60.0
-    t_end = 6.66 * 60.0
-    t_mid = (t_start + t_end) / 2.0
-    value = cycle.value_at(t_mid)
-    assert abs(value - 11.0) < 0.1
+    # Ramp rows: (0min,0cm) (2min,15cm) (4min,0cm) -- midpoint of the
+    # 0min -> 2min segment should be the linear midpoint.
+    value = cycle.value_at(60.0)
+    assert abs(value - 7.5) < 0.1
 
 
 def test_value_at_wraps_on_period():

@@ -329,3 +329,32 @@ mimic diagram to a two-tank stack (dashed, dim-filled upstream tank using
 the already-wired `H1 (est.)` value, connected by a pipe glyph to the
 existing downstream tank) rather than adding a new field -- the value was
 already on the panel as text, just not drawn.
+
+## cycles/: step_response.csv and ramp_response.csv replaced with the actual demo values (2026-08-12)
+
+The two example cycles copied from `src/templates/` (8<->14 cm, 10 and 13
+minute periods) were generic test fixtures, not what the operator
+remembered from the actual published demo (5<->10 cm step, 0->15->0 cm
+ramp, both 4 minute periods). Found the real ones at
+`vodarna_demo/cycles/Step_Cycle.csv` and `Ramp_Cycle.csv` (same repo, a
+separate packaged demo build) and swapped their content in verbatim
+(`cycles/step_response.csv`, `cycles/ramp_response.csv`, filenames kept so
+nothing else needed to change). `cycles/tests/test_cycle_loader.py`'s
+assertions were updated to match. This also fixed a real usability
+problem, not just a content mismatch: a 10-13 minute period made it
+impossible to see any cycle progress in a short manual test session,
+while the 4 minute period comfortably shows a full step transition and
+ramp within a few minutes, including the MPC visibly raising `PID.SP`
+~40s (one solve horizon) ahead of the step.
+
+## hmi/: trend chart was tiny and distorted on resize (fixed)
+
+`hmi/static/style.css`'s `.trend` rule fixed the SVG's CSS height at 70px
+while width followed the container (`width: 100%`), and `buildTrendSvg`
+used `preserveAspectRatio="none"`, so the plot stretched non-uniformly
+(text and line weight visibly distorting) whenever the container's actual
+width didn't match the SVG's fixed 300-unit viewBox width, and stayed
+cramped regardless of available space. Fixed by switching to CSS
+`aspect-ratio: 300 / 110` (matching a taller `buildTrendSvg` viewBox) with
+`height: auto`, and dropping `preserveAspectRatio="none"` so the SVG
+scales uniformly with its container instead of stretching.

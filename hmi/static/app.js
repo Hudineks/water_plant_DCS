@@ -148,7 +148,7 @@ function buildTrendSvg(history, height, width) {
     })
     .join("");
 
-  return `<svg class="trend" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none">
+  return `<svg class="trend" viewBox="0 0 ${width} ${height}">
     ${shadeSvg}
     <line x1="${marginLeft}" y1="${marginTop}" x2="${marginLeft}" y2="${marginTop + plotH}" stroke="${AXIS_LINE_COLOR}" stroke-width="1" />
     <polyline points="${spPts}" fill="none" stroke="#e0b12e" stroke-width="1" />
@@ -217,13 +217,14 @@ function renderUnit(unit, h1Estimated, control) {
         <span class="k">SCAN</span><span class="v">${fmt(v["Status.ScanTime_ms"], 0, "ms")}</span>
       </div>
     </div>
-    ${buildTrendSvg(unit.history, 70, 300)}
+    ${buildTrendSvg(unit.history, 110, 300)}
     <div class="cycle-row">
       <span class="label mono">CYCLE</span>
       <select data-cycle-select="${unit.unit_id}" ${connected ? "" : "disabled"}>${cycleOptionsHtml}</select>
-      <input type="number" step="0.01" data-manual-target="${unit.unit_id}" value="${manualTargetM.toFixed(2)}" title="target used when CYCLE = MANUAL">
+      <input type="number" step="0.01" data-manual-target="${unit.unit_id}" value="${manualTargetM.toFixed(2)}" title="target level used only when CYCLE = MANUAL" ${cycleName === "manual" ? "" : "disabled"}>
       <span class="mono">m</span>
       <button data-cycle-submit="${unit.unit_id}" ${connected ? "" : "disabled"}>SET</button>
+      <span class="hint">OFF = DCS ignores this unit entirely (manual SP below takes over). MANUAL = DCS still actively holds the field's target.</span>
     </div>
     <div class="sp-row">
       <span class="label mono">MANUAL SP</span>
@@ -301,6 +302,13 @@ function render(snapshot) {
   renderTopbar(snapshot);
   serverTimeEl.textContent = "SERVER: " + new Date(snapshot.server_time * 1000).toLocaleTimeString();
 }
+
+unitsEl.addEventListener("change", (ev) => {
+  const uid = ev.target.getAttribute("data-cycle-select");
+  if (!uid) return;
+  const targetInput = unitsEl.querySelector(`[data-manual-target="${uid}"]`);
+  if (targetInput) targetInput.disabled = ev.target.value !== "manual";
+});
 
 unitsEl.addEventListener("click", async (ev) => {
   const spUid = ev.target.getAttribute("data-sp-submit");
