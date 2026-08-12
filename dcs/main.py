@@ -81,6 +81,7 @@ class UnitRuntime:
         self.controller = UnitController(unit_id)
         self.manual_target_m = 0.15
         self.active = False
+        self.was_alive = False
         self.last_solve_time_ms = 0.0
         self.last_converged = True
 
@@ -119,8 +120,24 @@ async def control_loop(
                 heartbeat = rt.client.get_cached("Status.Heartbeat")
                 is_alive = watchdog.observe(rt.unit_id, heartbeat) and rt.client.connected
                 if is_alive:
+                    if not rt.was_alive:
+                        # Unit just (re)connected, e.g. its plc.unit process
+                        # was restarted. Its real level is whatever the new
+                        # process started at, unrelated to whatever this
+                        # controller's EKF/MPC state (x_hat) was tracking
+                        # before the gap. Without a reset here, the next
+                        # solve mixes a stale internal state estimate with a
+                        # fresh, unrelated measurement, which can produce a
+                        # bad PID.SP and drive the real plant toward its LL
+                        # interlock exactly like the bug PREDICTION_HORIZON_INDEX=25
+                        # already fixes for a too-shallow horizon (see
+                        # OPEN_QUESTIONS.md) -- same symptom, different cause.
+                        logger.info("Unit%d: (re)connected, forcing bumpless reset", rt.unit_id)
+                        rt.controller.request_bumpless_reset()
+                    rt.was_alive = True
                     alive_runtimes.append(rt)
                 else:
+                    rt.was_alive = False
                     logger.warning("Unit%d: dropped from optimization loop (dead heartbeat or disconnected)", rt.unit_id)
 
             solve_futures = {}

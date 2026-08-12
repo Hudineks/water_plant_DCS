@@ -195,6 +195,27 @@ main {
   display: block;
 }
 
+.trend-legend {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  color: var(--text-dim);
+  margin-bottom: 3px;
+}
+
+.legend-swatch {
+  display: inline-block;
+  width: 14px;
+  height: 2px;
+  margin-right: 2px;
+}
+
+.legend-swatch:not(:first-child) { margin-left: 12px; }
+
+.legend-pv { background: #3d8bd4; }
+.legend-sp { background: #e0b12e; }
+
 .sp-row, .cycle-row {
   display: flex;
   gap: 6px;

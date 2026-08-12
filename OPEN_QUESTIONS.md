@@ -358,3 +358,57 @@ cramped regardless of available space. Fixed by switching to CSS
 `aspect-ratio: 300 / 110` (matching a taller `buildTrendSvg` viewBox) with
 `height: auto`, and dropping `preserveAspectRatio="none"` so the SVG
 scales uniformly with its container instead of stretching.
+
+## dcs/: units reconnecting mid-session collapsed to the LL interlock (fixed)
+
+Found live: killing and restarting one PLC unit's process mid-session (the
+exact scenario `demos/demo_b_lost_unit.py` exercises, and what happens if
+an operator restarts a stuck unit by hand) reproduced the same collapse-to-LL
+failure mode already fixed once for `PREDICTION_HORIZON_INDEX=1` (see the
+entry above), but through a different path: `UnitController.set_setpoint_source()`
+only triggers a bumpless reset when the *cycle selection* changes, not when
+a unit's OPC UA client reconnects after a gap. The controller's EKF/MPC
+internal state (`x_hat`) kept whatever it was tracking before the
+disconnect, now completely unrelated to the real plant, which just started
+fresh (a new `plc.unit` process starts at `INITIAL_LEVEL_M`, not wherever
+the old one left off). The next solve mixed that stale internal estimate
+with a fresh, unrelated real measurement, producing a bad `PID.SP` that
+drove the real plant toward its LL interlock and tripped it, on all three
+units simultaneously when reproduced.
+
+Fixed in `dcs/main.py`'s `control_loop`: `UnitRuntime.was_alive` tracks
+each unit's alive/dead state across cycles, and a False -> True transition
+(the unit just reconnected, whether from a restart or a transient network
+gap) now calls `request_bumpless_reset()` directly, the same call
+`set_setpoint_source()` already made for cycle changes. Verified live: killed
+unit 2's `plc.unit` process, waited 35s (past the watchdog window) to
+reproduce it deliberately, restarted it, confirmed the log shows "Unit2:
+(re)connected, forcing bumpless reset" and the unit recovers to `CASCADE`
+with no interlock trip and normal tracking within a few cycles, instead of
+collapsing.
+
+## hmi/: the CYCLE dropdown could not actually be used (fixed)
+
+The value-preservation fix above (`captureFocusedInput`/`restoreFocusedInput`)
+solved losing typed text in a plain `<input>`, but a native `<select>`
+is different: while its dropdown popup is open, it is a browser-native
+overlay outside the DOM. `render()` rebuilding `#units`' `innerHTML` every
+~1s destroyed and recreated the `<select>` out from under that open
+popup, force-closing it before the operator's click could land on an
+option -- patching the value back afterward does not help, since the
+popup itself is gone. This looked like "the dropdown just keeps
+refreshing and I can't select anything," which is exactly what was
+happening.
+
+Replaced the whole approach: instead of rebuilding then trying to repair
+state, `render()` now checks whether `document.activeElement` is inside
+`#units` and, if so, skips rebuilding `#units` entirely for that tick,
+queuing the snapshot (`pendingUnitsSnapshot`) instead. Alarms, the top
+status bar, and the clock keep updating live regardless. Once focus
+leaves `#units` (a `focusout` listener re-checks on the next tick, since
+disabling a button on click already blurs it per the HTML spec, so
+submitting an action naturally resumes updates), the most recent queued
+snapshot is applied in one rebuild. While the operator is actively using
+any control in the panel, nothing underneath it moves; this is a
+deliberate tradeoff (a still panel while you're using it beats a panel
+that fights your click), not an oversight.

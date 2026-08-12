@@ -35,39 +35,49 @@ function tankLevelPct(pv, hh) {
   return Math.max(0, Math.min(100, pct));
 }
 
-/* --- Focus preservation across full-innerHTML re-renders ---
+/* --- Freeze #units while the operator is using a control in it ---
  * render() rebuilds #units from scratch on every websocket push (~1/s).
- * A plain rebuild destroys and recreates every <input>/<select>, so
- * anything the operator is mid-typing into is lost before they can submit
- * it. captureFocusedInput()/restoreFocusedInput() save and reapply focus,
- * value, and cursor position across one rebuild, for any element tagged
- * with one of the data-* attributes below. This is the fix for "the
- * manual SP field doesn't hold what I type."
+ * A plain rebuild destroys and recreates every <input>/<select>. That does
+ * not just clear a text field's value (the original bug report): for a
+ * native <select>, destroying the element while its dropdown popup is
+ * open force-closes the popup out from under the operator's click, so it
+ * looks like the menu "keeps refreshing" and nothing can ever be chosen.
+ * Patching the value back after the fact (an earlier version of this
+ * fix) does not help, since the popup is a browser-native overlay outside
+ * the DOM the patch can see.
+ *
+ * The actual fix: while document.activeElement is inside #units, skip
+ * rebuilding #units entirely for that tick (queue the snapshot instead).
+ * Everything else (alarms, topbar, clock) keeps updating live. Once focus
+ * leaves #units (the operator clicks away, tabs out, or a write completes
+ * and the button blurs), the most recent queued snapshot is applied in
+ * one rebuild, so the panel catches up instead of silently going stale.
  */
-const FOCUS_TRACK_ATTRS = ["data-sp-input", "data-cycle-select", "data-manual-target"];
+let pendingUnitsSnapshot = null;
 
-function captureFocusedInput(container) {
-  const el = document.activeElement;
-  if (!el || !container.contains(el)) return null;
-  for (const attr of FOCUS_TRACK_ATTRS) {
-    const val = el.getAttribute(attr);
-    if (val !== null) {
-      return { attr, val, value: el.value, selStart: el.selectionStart, selEnd: el.selectionEnd };
+function isFocusInsideUnits() {
+  return !!(document.activeElement && unitsEl.contains(document.activeElement));
+}
+
+function renderUnits(snapshot) {
+  const order = Object.keys(snapshot.units).sort((a, b) => Number(a) - Number(b));
+  const diagnostics = (snapshot.dcs && snapshot.dcs.diagnostics) || {};
+  const unitControl = (snapshot.dcs && snapshot.dcs.unit_control) || {};
+  unitsEl.innerHTML = order
+    .map((uid) => renderUnit(snapshot.units[uid], diagnostics[uid], unitControl[uid]))
+    .join("");
+}
+
+unitsEl.addEventListener("focusout", () => {
+  // focusout fires before the newly-focused element (if any) is committed,
+  // so check on the next tick whether focus actually left #units.
+  setTimeout(() => {
+    if (!isFocusInsideUnits() && pendingUnitsSnapshot) {
+      renderUnits(pendingUnitsSnapshot);
+      pendingUnitsSnapshot = null;
     }
-  }
-  return null;
-}
-
-function restoreFocusedInput(container, captured) {
-  if (!captured) return;
-  const el = container.querySelector(`[${captured.attr}="${captured.val}"]`);
-  if (!el) return;
-  el.value = captured.value;
-  el.focus();
-  if (typeof captured.selStart === "number" && el.setSelectionRange) {
-    try { el.setSelectionRange(captured.selStart, captured.selEnd); } catch (e) { /* not a text-selectable input */ }
-  }
-}
+  }, 0);
+});
 
 const AXIS_LABEL_COLOR = "#8a97a3";
 const AXIS_LINE_COLOR = "#24303a";
@@ -217,6 +227,10 @@ function renderUnit(unit, h1Estimated, control) {
         <span class="k">SCAN</span><span class="v">${fmt(v["Status.ScanTime_ms"], 0, "ms")}</span>
       </div>
     </div>
+    <div class="trend-legend mono">
+      <span class="legend-swatch legend-pv"></span>LEVEL.PV (measured)
+      <span class="legend-swatch legend-sp"></span>LEVEL.SP (setpoint)
+    </div>
     ${buildTrendSvg(unit.history, 110, 300)}
     <div class="cycle-row">
       <span class="label mono">CYCLE</span>
@@ -287,16 +301,13 @@ function renderTopbar(snapshot) {
 
 function render(snapshot) {
   lastSnapshot = snapshot;
-  const focused = captureFocusedInput(unitsEl);
 
-  const order = Object.keys(snapshot.units).sort((a, b) => Number(a) - Number(b));
-  const diagnostics = (snapshot.dcs && snapshot.dcs.diagnostics) || {};
-  const unitControl = (snapshot.dcs && snapshot.dcs.unit_control) || {};
-  unitsEl.innerHTML = order
-    .map((uid) => renderUnit(snapshot.units[uid], diagnostics[uid], unitControl[uid]))
-    .join("");
-
-  restoreFocusedInput(unitsEl, focused);
+  if (isFocusInsideUnits()) {
+    pendingUnitsSnapshot = snapshot;
+  } else {
+    renderUnits(snapshot);
+    pendingUnitsSnapshot = null;
+  }
 
   renderAlarms(snapshot);
   renderTopbar(snapshot);
