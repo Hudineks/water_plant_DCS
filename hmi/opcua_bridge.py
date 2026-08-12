@@ -72,12 +72,18 @@ class DcsState:
     endpoint: str
     connected: bool = False
     values: dict = field(default_factory=dict)
+    # unit_id -> h1 estimate (m). Not part of tags.yaml, see
+    # dcs/global_server.py's Unit{n}/Diagnostics/H1_Estimated node: the
+    # real rig's upstream tank has no sensor, this is the DCS's own EKF
+    # estimate, published diagnostically for the operator panel only.
+    diagnostics: dict = field(default_factory=dict)
     error: str = ""
 
     def snapshot(self) -> dict:
         return {
             "connected": self.connected,
             "values": self.values,
+            "diagnostics": self.diagnostics,
             "error": self.error,
         }
 
@@ -185,8 +191,24 @@ async def _poll_dcs(state: PlantState):
                 dcs.error = ""
                 logger.info("DCS connected at %s", dcs.endpoint)
 
+                diag_nodes: dict[int, object] = {}
+                for unit_id in state.units:
+                    try:
+                        unit_object = await _find_child_object(client, f"Unit{unit_id}")
+                        diag_object = await unit_object.get_child(
+                            f"{unit_object.nodeid.NamespaceIndex}:Diagnostics"
+                        )
+                        diag_nodes[unit_id] = await diag_object.get_child(
+                            f"{diag_object.nodeid.NamespaceIndex}:H1_Estimated"
+                        )
+                    except UaError:
+                        pass  # diagnostic node not published for this unit, skip it
+
                 while True:
                     dcs.values = await read_all(nodes)
+                    dcs.diagnostics = {
+                        uid: await node.read_value() for uid, node in diag_nodes.items()
+                    }
                     if state.on_change:
                         state.on_change()
                     await asyncio.sleep(POLL_PERIOD_S)

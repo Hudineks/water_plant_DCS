@@ -11,7 +11,8 @@ setpoints. Port 8080.
  PLC unit 2 OPC UA server  }--- polled 1x/s each ---\
  PLC unit 3 OPC UA server /                          \
                                                         v
- DCS OPC UA server (global APC.* tags) --- polled 1x/s --> hmi/opcua_bridge.py
+ DCS OPC UA server (global APC.* tags        --- polled 1x/s --> hmi/opcua_bridge.py
+  + per-unit Diagnostics.H1_Estimated)
                                                         |    (asyncio tasks,
                                                         |     one per source,
                                                         |     PlantState)
@@ -59,7 +60,11 @@ setpoints. Port 8080.
   tools/fake_plc.py's / plc/'s naming). Default assumes
   `python tools/fake_plc.py --units 3 --base-port 4840` on localhost:
   `opc.tcp://localhost:4840/,opc.tcp://localhost:4841/,opc.tcp://localhost:4842/`.
-- `DCS_ENDPOINT` -- the DCS's own OPC UA server, for the global APC.* tags.
+- `DCS_ENDPOINT` -- the DCS's own OPC UA server, for the global APC.* tags
+  and each unit's `Diagnostics.H1_Estimated` (the EKF's estimate of the
+  upstream tank's level, which has no sensor in the real rig and so is not
+  in tags.yaml, see `dcs/README.md`). Shown per unit as "H1 (est.,
+  unmeasured)" on the operator panel.
   Default `opc.tcp://localhost:4850/`. tags.yaml does not fix this
   port/shape; see OPEN_QUESTIONS.md for the assumption this makes and why.
 

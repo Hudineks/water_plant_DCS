@@ -26,7 +26,13 @@ from .pid import PID
 
 logger = logging.getLogger("plc.scan_engine")
 
-SP_STALE_TIMEOUT_S = 5.0
+# Generous enough to survive a real DCS's own startup latency (building 3
+# do-mpc/casadi MPC controllers takes 10-15s in this project) without
+# tripping AUTO before the DCS has ever written a setpoint. A shorter
+# value here would make every normal sequential startup (plc/ up first,
+# then dcs/) fall back to AUTO immediately, since PID.SP's write-age clock
+# starts ticking the moment the PLC seeds its own initial value.
+SP_STALE_TIMEOUT_S = 30.0
 
 
 @dataclass
@@ -38,8 +44,6 @@ class ScanOutputs:
     pump_cmd: float
     pump_fb: float
     pump_running: bool
-    valve_cmd: float
-    valve_fb: float
     pid_sp: float
     pid_out: float
     pid_mode: str
@@ -55,28 +59,24 @@ class ScanEngine:
         hh: float,
         ll: float,
         local_sp: float,
-        valve_cmd_pct: float = 30.0,
-        pid_kp: float = 40.0,
-        pid_ki: float = 5.0,
-        pid_kd: float = 0.0,
-        area_m2: float = 2.0,
-        pump_max_flow_m3s: float = 0.05,
-        valve_cv: float = 0.03,
-        initial_level_m: float = 1.5,
+        pid_kp: float = 600.0,
+        pid_ki: float = 10.0,
+        pid_kd: float = 100.0,
+        pump_max_flow_cm3s: float = 17.0,
+        initial_level_m: float = 0.05,
         initial_mode: str = "CASCADE",
     ):
+        initial_level_cm = initial_level_m * 100.0
         self.model = TankModel(
-            area_m2=area_m2,
-            pump_max_flow_m3s=pump_max_flow_m3s,
-            valve_cv=valve_cv,
-            level_m=initial_level_m,
+            pump_max_flow_cm3s=pump_max_flow_cm3s,
+            h1_cm=initial_level_cm,
+            h2_cm=initial_level_cm,
         )
         self.pid = PID(kp=pid_kp, ki=pid_ki, kd=pid_kd, out_min=0.0, out_max=100.0)
         self.interlock = InterlockLogic(hh=hh, ll=ll)
 
         self.local_sp = local_sp
         self.mode = initial_mode
-        self.valve_cmd_pct = valve_cmd_pct  # disturbance input, not controlled by the PID
 
         self._last_cascade_sp = local_sp
         self._last_pump_cmd = 0.0
@@ -98,7 +98,7 @@ class ScanEngine:
         t0 = time.perf_counter()
 
         # --- READ INPUTS ---
-        level_pv = self.model.level_m
+        level_pv = self.model.h2_cm / 100.0  # meters, at the OPC UA boundary
 
         # --- EXECUTE LOGIC ---
         if self.mode == "CASCADE":
@@ -129,7 +129,8 @@ class ScanEngine:
 
         pump_running = pump_cmd > 0.0 and not tripped
 
-        new_level = self.model.step(pump_cmd, self.valve_cmd_pct, dt_sim_s)
+        new_level_cm = self.model.step(pump_cmd, dt_sim_s)
+        new_level = new_level_cm / 100.0
 
         self._last_pump_cmd = pump_cmd
         self.heartbeat += 1
@@ -144,8 +145,6 @@ class ScanEngine:
             pump_cmd=pump_cmd,
             pump_fb=pump_cmd,
             pump_running=pump_running,
-            valve_cmd=self.valve_cmd_pct,
-            valve_fb=self.valve_cmd_pct,
             pid_sp=dcs_sp,
             pid_out=pid_out,
             pid_mode=self.mode,

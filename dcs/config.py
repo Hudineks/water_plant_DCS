@@ -46,6 +46,19 @@ class Config:
     # OPC UA client reconnect backoff, seconds.
     reconnect_backoff_s: float = 2.0
 
+    # Per-unit setpoint source: unit_id -> cycle CSV path (real MPC horizon
+    # preview, see reference/water_mpc/mpc_core.py's set_cycle) or a plain
+    # float (constant target, today's behavior). Defaults to the project's
+    # canonical demo: Unit1 tracks a step profile, Unit2 a ramp profile,
+    # Unit3 holds a constant setpoint, so `docker compose up` reproduces
+    # the demo with no extra configuration.
+    unit_setpoint_sources: dict = field(default_factory=dict)
+
+
+# Repo-root-relative, resolved against this file's parent's parent at call time.
+DEFAULT_UNIT_CYCLES = {1: "cycles/step_response.csv", 2: "cycles/ramp_response.csv"}
+DEFAULT_UNIT_CONSTANT_TARGET_M = 0.15
+
 
 def load_config() -> Config:
     raw_endpoints = os.environ.get("PLC_ENDPOINTS", "")
@@ -58,12 +71,26 @@ def load_config() -> Config:
             "opc.tcp://127.0.0.1:4842/",
         ]
 
+    unit_setpoint_sources: dict = {}
+    for i in range(1, len(endpoints) + 1):
+        cycle_env = os.environ.get(f"DCS_UNIT{i}_CYCLE")
+        target_env = os.environ.get(f"DCS_UNIT{i}_TARGET_M")
+        if cycle_env:
+            unit_setpoint_sources[i] = cycle_env
+        elif target_env:
+            unit_setpoint_sources[i] = float(target_env)
+        elif i in DEFAULT_UNIT_CYCLES:
+            unit_setpoint_sources[i] = DEFAULT_UNIT_CYCLES[i]
+        else:
+            unit_setpoint_sources[i] = DEFAULT_UNIT_CONSTANT_TARGET_M
+
     return Config(
         plc_endpoints=endpoints,
         dcs_server_endpoint=os.environ.get("DCS_SERVER_ENDPOINT", "opc.tcp://0.0.0.0:4900/"),
         cycle_s=float(os.environ.get("DCS_CYCLE_S", "1.0")),
-        solve_budget_s=float(os.environ.get("DCS_SOLVE_BUDGET_S", "0.8")),
+        solve_budget_s=float(os.environ.get("DCS_SOLVE_BUDGET_S", "2.0")),
         heartbeat_stall_cycles=int(os.environ.get("DCS_HEARTBEAT_STALL_CYCLES", "5")),
         historian_db_path=os.environ.get("DCS_HISTORIAN_DB", "dcs_historian.sqlite3"),
         reconnect_backoff_s=float(os.environ.get("DCS_RECONNECT_BACKOFF_S", "2.0")),
+        unit_setpoint_sources=unit_setpoint_sources,
     )

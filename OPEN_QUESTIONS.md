@@ -36,17 +36,18 @@ by the DCS. AUTO mode uses an internally held `local_sp`, seeded from
 last known good cascade value. There is no way for an external client to
 change the AUTO setpoint independently of CASCADE writes in this v1.
 
-## plc/: Valve.CMD is read-only, so it cannot be varied as a disturbance
+## SUPERSEDED: plc/: Valve.CMD is read-only, so it cannot be varied as a disturbance
 
-`Valve.CMD` is `access: R` and described as a disturbance input, so plc/
-treats it as a fixed constant (`VALVE_CMD_PCT` env var, default 30%)
-instead of something that changes during a run. Demo A (outflow
-disturbance, APC on vs off) needs a moving disturbance to be meaningful.
-Either tags.yaml needs `Valve.CMD` to be `RW` (written by a
-disturbance-injection tool, not by the PLC itself), or the PLC needs its
-own internal disturbance schedule. Neither is in tags.yaml today; picking
-one is an integration decision, not something a single-directory agent
-should decide alone.
+Superseded 2026-08-12: `Valve.CMD`/`Valve.FB` were removed from tags.yaml
+entirely, not made writable. The real Vodarna rig this project models has
+no valve at all -- a pump fills an upstream tank, both inter-tank and
+outlet flows are fixed gravity orifices (Torricelli's law) -- so a
+disturbance-input valve was never physically accurate to begin with. See
+"plc/ and reference/: two-tank-in-series rework" below for the fix, and
+`demos/plc_stub.py`'s `--disturbance-file` mechanism for how demo_a now
+scripts a disturbance without a valve tag (a direct, internally-applied
+step on `Level.PV`, since that tag is read-only and only the server
+process that owns a node may write it locally).
 
 ## dcs/: no tag for an operator/APC target level
 
@@ -59,22 +60,18 @@ there is nothing in the contract to read a per-unit target from. If a
 target-level tag is added to tags.yaml later, `dcs/main.py`'s
 `target_level_m` is the one line to change.
 
-## dcs/: reference/water_mpc's physical envelope does not match this plant's scale
+## RESOLVED: dcs/: reference/water_mpc's physical envelope does not match this plant's scale
 
-`reference/water_mpc/mpc_core.py` models a small lab rig (H1_MAX=15 cm,
-H2_MAX=20 cm, i.e. 0-0.2 m). `tools/fake_plc.py` random-walks `Level.PV`
-over 0-4 m and sets `Level.HH=9.0`, `Level.LL=0.5` for every unit. Clipping
-`PID.SP` to the unit's real `Level.LL`/`Level.HH` (0.5-9 m) would put every
-setpoint outside the ported controller's valid state range and defeat the
-MPC trajectory entirely (SP would pin to 0.5 m forever). `dcs/controller_wrapper.py`
-clips `PID.SP` to the model's own envelope (0-0.2 m) first and only
-additionally tightens against `Level.LL`/`Level.HH` when those fall inside
-that envelope, which they do not with fake_plc's current defaults. This
-means the DCS demo runs the MPC over a 0-0.2 m band regardless of the
-unit's real interlock thresholds. Rescaling the ported model to the
-plant's actual tank geometry (or getting real tank geometry from plc/) is
-out of scope here and would be the fix if setpoints need to span the full
-`Level.PV` range.
+Resolved 2026-08-12: `plc/model.py` was rewritten to use the exact same
+tank geometry constants as `reference/water_mpc/mpc_core.py`
+(`D_TANK_MM=50`, `D_HOLE_MM=4`, `Cd=0.61`), so `Level.PV`'s real operating
+band is now ~0-0.20 m, matching the ported controller's own valid envelope
+instead of `tools/fake_plc.py`'s old placeholder 0-4 m random walk.
+`plc/unit.py`'s `LEVEL_HH`/`LEVEL_LL` defaults moved to 0.18 m / 0.01 m to
+match. `dcs/controller_wrapper.py`'s clip-to-model-envelope logic is
+unchanged and still correct, it just now agrees with the plant's real
+interlock thresholds instead of silently overriding them. See "plc/ and
+reference/: two-tank-in-series rework" below for the full change.
 
 ## dcs/: reference WaterTankController.__init__ incompatible with do-mpc 5.1.1
 
@@ -166,3 +163,121 @@ setpoint (clipped to the reference model's 0-0.2 m envelope, see the entry
 above on the scale mismatch) and stayed there under `PID.Mode=CASCADE`, and
 `GET /api/state` on the HMI showed all three units and the DCS connected
 with live values.
+
+## plc/ and reference/: two-tank-in-series rework (2026-08-12)
+
+The single-tank pump+valve model from the initial build did not match the
+physical system this project is a DCS/APC counterpart to (the original
+Vodarna rig: a pump fills tank 1, which has no sensor, only an EKF
+estimate; tank 1 drains by gravity through a fixed orifice into tank 2,
+which has the real sensor and is the PID/MPC-controlled level; tank 2
+drains by its own fixed orifice to the sump; no valve anywhere).
+`plc/model.py` was rewritten as a faithful two-tank-in-series ODE using
+the exact same physical constants as `reference/water_mpc/mpc_core.py`.
+`Valve.CMD`/`Valve.FB` were removed from tags.yaml (see the superseded
+entry above). `plc/interlocks.py`'s `DRY_RUN_LEVEL_M` and `plc/unit.py`'s
+`LEVEL_HH`/`LEVEL_LL`/`INITIAL_LEVEL_M` defaults, all tuned for the old
+meter-scale single tank, moved to the new ~0-0.20 m band. The local PID's
+gains (`PID_KP`/`PID_KI`/`PID_KD`) also needed retuning for the much
+smaller, much faster-responding tank (empirically swept, landed on
+kp=600/ki=10/kd=100, see `plc/tests/test_scan_engine.py`); the old
+kp=40/ki=5 gains produced negligible authority against cm-scale errors and
+either drained the tank into a permanent LL trip or oscillated into an HH/LL
+limit cycle depending on how far they were pushed.
+
+## reference/water_mpc/mpc_core.py: MPC previously got no benefit from lookahead (fixed)
+
+`WaterTankController._tvp_fun_mpc` broadcast a single flat setpoint value
+across the MPC's entire prediction horizon, meaning the "predictive" part
+of the controller was never actually exercised: it reacted to the current
+error every cycle exactly like a plain PID would, just through a much
+heavier solver. The original rig's real advantage (`load_cycle_to_mpc`/
+`tvp_fun` in `src/models/mpc_water_tank_controller.py`) was giving the
+solver a true preview of a future setpoint change before it happens.
+`WaterTankController.set_cycle()` was added (additive, existing scalar-SP
+callers see no behavior change) so `dcs/` can hand a unit a
+`cycles.loader.SetpointCycle` and get real horizon preview back, ported
+from the original CSV format and lookup logic. See `dcs/config.py`'s
+`unit_setpoint_sources` for how each unit gets its setpoint source, and
+`cycles/` for the loader and the two example CSVs (reused unmodified from
+`src/templates/`).
+
+## dcs/: Diagnostics.H1_Estimated is not in tags.yaml on purpose
+
+The real rig's upstream tank (h1) has no sensor, only an EKF estimate
+computed alongside the MPC. tags.yaml's unit contract describes what a PLC
+actually publishes, and the real PLC never publishes h1 either, so adding
+an `h1` tag there would misrepresent the physical system. Instead
+`dcs/global_server.py` publishes the estimate itself, per unit, as
+`Unit{n}/Diagnostics/H1_Estimated` on the DCS's own OPC UA server
+(alongside the existing `APC.*` globals), built with a small ad hoc helper
+rather than routed through `plantbus`/tags.yaml. The HMI reads it purely
+for display.
+
+## dcs/: closed-loop instability from PREDICTION_HORIZON_INDEX=1 (fixed)
+
+Found during live end-to-end testing of the two-tank rework: running the
+full real stack (real `plc.unit` x3 + real `dcs.main`, APC enabled) for
+more than about a minute, every unit's `Level.PV` and `PID.SP` drifted
+together down to the LL interlock and tripped, regardless of the unit's
+actual target (constant or cycle). Root cause, confirmed by an isolated
+in-process reproduction (real `UnitController` driving a real
+`ScanEngine`, no OPC UA, fast to iterate) and by inspecting the MPC's raw
+horizon prediction directly:
+
+`dcs/controller_wrapper.py`'s `_extract_predicted_sp_m` read horizon index
+1 (`PREDICTION_HORIZON_INDEX = 1`, "one t_step ahead") as the next
+`PID.SP`. The MPC's own internal plan was correct (pump near `U_MAX` for
+many steps, `h2` climbing steadily across the full 40-step horizon), but
+index 1 of a slow, gradual 40-second climb is barely different from the
+current measurement (a fraction of a millimeter). The PLC's local PID
+then saw a near-zero error and applied near-zero pump command, directly
+contradicting the MPC's own internal plan of sustained near-max flow. The
+real plant, receiving almost no inflow, drained under gravity outflow.
+The EKF's next state estimate was then seeded from that lower real
+measurement, and the cycle repeated: predicted-SP-tracks-real-PV,
+real-PV-drains-because-no-real-command, one step down every cycle,
+compounding until LL.
+
+This was a latent bug from the original v1 build, not something the
+two-tank rework introduced, but it was invisible until now: the
+single-tank model's much slower, much larger-scale dynamics meant a
+one-second predicted increment was still a meaningful, trackable move
+relative to typical PID gains and interlock spacing, and the short (tens
+of seconds) smoke tests run during v1 verification never ran long enough
+to reveal the slow compounding drift.
+
+Fixed by raising `PREDICTION_HORIZON_INDEX` to 25 (empirically swept
+5/10/15/20/25/30 against the real closed loop in the isolated
+reproduction above; 1-10 still trip or dip badly, 15+ recovers, 25/30 are
+the most robust, 25 chosen to stay clear of the horizon's less-certain
+terminal edge). This gives the local PID a real, trackable setpoint gap
+consistent with the MPC's own dynamically-planned trajectory, restoring
+the intended cascade behavior. `dcs/tests/test_bumpless_transfer.py`'s
+`MAX_FIRST_STEP_JUMP_M` was loosened from 0.02 to 0.05 m to match: a
+meaningfully-sized first step toward a distant target is now correct
+behavior, not something bumpless transfer should suppress (see that
+test's updated docstring for why this is not the same thing as an
+un-bumpless snap).
+
+Live evidence after the fix: 3 real `plc.unit` processes + real
+`dcs.main` + real `hmi`, APC enabled, run for 90+ seconds. `APC.Status`
+stayed `OK` throughout (no `SOLVER_FAIL`), all three units' `Level.PV`
+climbed steadily and monotonically (0.042 m -> 0.066-0.074 m over 90s),
+no interlock trips, and Unit 3 (constant target) visibly pulled ahead of
+Units 1/2 (still in the flat opening phase of their step/ramp cycles) as
+expected.
+
+## dcs/: solve_budget_s default mismatch caused persistent SOLVER_FAIL (fixed)
+
+Found in the same investigation above: `dcs/config.py`'s `Config`
+dataclass default for `solve_budget_s` is `2.0`, matching `dcs/README.md`'s
+documented behavior ("2.0 s to give 3 units headroom"), but
+`load_config()`'s env-var fallback read `"0.8"` instead, so every real run
+without `DCS_SOLVE_BUDGET_S` set (the common case, including
+`docker-compose.yml`) actually used an 0.8 s budget. Three concurrent
+do-mpc solves take roughly `N * ~0.35 s` wall time under this environment
+(ipopt does not release the GIL for the whole solve, see `dcs/README.md`),
+so 3 units cost ~1.05 s, comfortably exceeding an 0.8 s budget and
+triggering `SOLVER_FAIL`/hold-last-SP almost every cycle. Fixed by
+changing the fallback to `"2.0"` to match the documented default.

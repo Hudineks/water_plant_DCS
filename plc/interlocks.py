@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 DRY_RUN_PUMP_THRESHOLD_PCT = 5.0   # pump considered "commanded on" above this
-DRY_RUN_LEVEL_M = 0.10             # level at/below which a running pump is dry
+DRY_RUN_LEVEL_M = 0.005            # level at/below which a running pump is dry
 DRY_RUN_SCAN_COUNT = 20            # consecutive scans before a dry-run trip (~2 s at 100 ms)
 
 

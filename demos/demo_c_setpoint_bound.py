@@ -1,8 +1,10 @@
 """Demo C: large setpoint change against a level bound.
 
-Scenario: unit 1's Level.HH (high-high interlock threshold) is 4.0 m. The
-operator enters a manual setpoint well above that (6.0 m) through the same
-HMI endpoint the panel's "MANUAL SP" field uses (POST
+Scenario: unit 1's Level.HH (high-high interlock threshold) is 0.18 m,
+matching the two-tank rig's real operating envelope (see
+reference/water_mpc/mpc_core.py's H2_MAX). The operator enters a manual
+setpoint well above that (0.30 m) through the same HMI endpoint the
+panel's "MANUAL SP" field uses (POST
 /api/units/1/setpoint). Expected result on the real stack: the PLC's PID
 follows PID.SP, level rises, and the interlock trips (Interlock.Trip=true,
 Interlock.Reason="HH level") before level reaches the unsafe setpoint,
@@ -11,14 +13,14 @@ Level.SP (the *effective* setpoint the PID is following) should therefore
 diverge from PID.SP (what the operator asked for), because the PLC clamps
 or trips instead of obeying literally -- that gap is the point of the demo.
 
-LIMITATION: demos/plc_stub.py (used here since plc/ is not built in this
-worktree) has no PID and no interlock logic, it only random-walks Level.PV
+LIMITATION: demos/plc_stub.py (used here for a lightweight HMI-only check)
+has no PID and no interlock logic, it only random-walks Level.PV
 regardless of PID.SP. So this script can only demonstrate the HMI side of
 the story: the write goes through the RW-access PID.SP tag exactly as
 tags.yaml defines it, and the HMI does not itself apply any bound (it is
-not its job to, per the SHARED CONSTRAINTS: interlocks are PLC-level). The
-actual clamp/trip behavior can only be observed once plc/'s PID and
-Interlock logic exist; re-run this script against that stack and watch
+not its job to: interlocks are PLC-level). The actual clamp/trip behavior
+needs a real plc/unit.py process instead of the stub; start one directly
+(see plc/README.md) and repeat this write against it to watch
 Interlock.Trip flip to true instead of Level.PV following the setpoint
 past Level.HH.
 
@@ -76,7 +78,7 @@ def main():
         hh = before["units"]["1"]["values"].get("Level.HH")
         print(f"[demo_c] unit 1 Level.HH interlock threshold = {hh} m")
 
-        target = 6.0
+        target = 0.30
         print(f"[demo_c] writing PID.SP={target} m through the HMI (well above HH={hh} m)")
         result = _http_post_json(f"http://localhost:{HMI_PORT}/api/units/1/setpoint", {"value": target})
         print(f"[demo_c] write result: {result}")

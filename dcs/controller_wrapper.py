@@ -49,9 +49,21 @@ from reference.water_mpc.mpc_core import (  # noqa: E402
 MODEL_LEVEL_MAX_M = H2_MAX / 100.0
 MODEL_LEVEL_MIN_M = 0.0
 
-# Index into the MPC's predicted horizon used as the next PID.SP. 1 means
-# "one t_step ahead", matching the 1 s DCS control cycle.
-PREDICTION_HORIZON_INDEX = 1
+# Index into the MPC's predicted horizon used as the next PID.SP, out of
+# n_horizon=40 (see reference/water_mpc/mpc_core.py). NOT 1 ("one t_step
+# ahead"): that value produces a real closed-loop instability, see
+# OPEN_QUESTIONS.md. With the two-tank model's real (fast, cm-scale)
+# dynamics, the point one second into the MPC's own plan is barely
+# different from the current measurement, since the plan reaches its
+# target gradually over the full horizon. The local PID then sees a
+# near-zero error and applies near-zero pump command, even though the
+# MPC's own internal plan calls for a large, sustained flow, so the real
+# plant just drains under gravity while the DCS's derived setpoint drifts
+# down with it. 25 was chosen empirically (see OPEN_QUESTIONS.md for the
+# sweep) as a point far enough into the horizon to carry real, trackable
+# separation from the current measurement, while still comfortably inside
+# the 40-step horizon rather than at its less-certain terminal edge.
+PREDICTION_HORIZON_INDEX = 25
 
 
 class _PortedWaterTankController(WaterTankController):
@@ -84,6 +96,8 @@ class _PortedWaterTankController(WaterTankController):
         self._tvp_template_mpc = self.mpc.get_tvp_template()
         self._horizon = self.mpc.settings.n_horizon + 1
         self._sp_cm = 0.0
+        self._cycle = None
+        self._t_now_s = 0.0
         self.mpc.set_tvp_fun(self._tvp_fun_mpc)
         self.mpc.setup()
 
@@ -111,13 +125,27 @@ class UnitController:
     unit's controller in its own worker thread.
     """
 
-    def __init__(self, unit_id: int, level_ll_m: float = 0.0, level_hh_m: float = 9.0):
+    def __init__(self, unit_id: int, level_ll_m: float = 0.0, level_hh_m: float = 9.0, cycle=None):
         self.unit_id = unit_id
         self.controller = _PortedWaterTankController()
         self.last_sp_m: float | None = None
         self.needs_bumpless_reset = True
         self.level_ll_m = level_ll_m
         self.level_hh_m = level_hh_m
+        self.cycle = cycle
+        if cycle is not None:
+            self.controller.set_cycle(cycle)
+
+    @property
+    def current_cycle_target_m(self) -> float | None:
+        """Instantaneous target the cycle is asking for right now, in
+        meters, for logging/diagnostics only. None if this unit has no
+        cycle (its target is whatever step() is called with instead). The
+        MPC's actual horizon preview comes from the cycle's tvp_fun
+        sampling in mpc_core.py, not from this single point."""
+        if self.cycle is None:
+            return None
+        return self.cycle.value_at(self.controller._t_now_s) / 100.0
 
     def request_bumpless_reset(self) -> None:
         """Call when APC.Enabled transitions False -> True for this unit."""

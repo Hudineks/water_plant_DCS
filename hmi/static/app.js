@@ -75,7 +75,7 @@ function buildTrendSvg(history, height, width) {
   </svg>`;
 }
 
-function renderUnit(unit) {
+function renderUnit(unit, h1Estimated) {
   const v = unit.values || {};
   const connected = unit.connected;
   const alive = unit.alive;
@@ -110,7 +110,7 @@ function renderUnit(unit) {
         <span class="k">LEVEL PV</span><span class="v">${fmt(pv, 2, "m")}</span>
         <span class="k">LEVEL SP</span><span class="v">${fmt(sp, 2, "m")}</span>
         <span class="k">PUMP CMD</span><span class="v">${fmt(v["Pump.CMD"], 1, "%")}</span>
-        <span class="k">VALVE CMD</span><span class="v">${fmt(v["Valve.CMD"], 1, "%")}</span>
+        <span class="k">H1 (EST., UNMEASURED)</span><span class="v">${fmt(h1Estimated, 3, "m")}</span>
         <span class="k">PID OUT</span><span class="v">${fmt(v["PID.OUT"], 1, "%")}</span>
         <span class="k">MODE</span><span class="v"><span class="mode-tag">${mode}</span></span>
         <span class="k">HEARTBEAT</span><span class="v">${fmt(v["Status.Heartbeat"], 0)}</span>
@@ -183,7 +183,10 @@ function renderTopbar(snapshot) {
 function render(snapshot) {
   lastSnapshot = snapshot;
   const order = Object.keys(snapshot.units).sort((a, b) => Number(a) - Number(b));
-  unitsEl.innerHTML = order.map((uid) => renderUnit(snapshot.units[uid])).join("");
+  const diagnostics = (snapshot.dcs && snapshot.dcs.diagnostics) || {};
+  unitsEl.innerHTML = order
+    .map((uid) => renderUnit(snapshot.units[uid], diagnostics[uid]))
+    .join("");
   renderAlarms(snapshot);
   renderTopbar(snapshot);
   serverTimeEl.textContent = "SERVER: " + new Date(snapshot.server_time * 1000).toLocaleTimeString();

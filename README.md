@@ -5,10 +5,17 @@ OPC UA supervisory MPC layer, and a browser-based operator panel, wired the
 way these systems are actually structured in a real plant.
 
 This is the industrial-control counterpart to the original Vodarna project
-(a physical single-tank rig with a do-mpc controller). Here the same MPC
-core is ported into a proper cascade architecture, communicating over OPC
-UA with simulated PLC units instead of talking to hardware or a GUI thread
+(a physical two-tank rig with a do-mpc controller). Here the same MPC core
+is ported into a proper cascade architecture, communicating over OPC UA
+with simulated PLC units instead of talking to hardware or a GUI thread
 directly.
+
+Each unit is a faithful copy of the original rig's physics: a pump fills
+an upstream tank, which has no sensor (only an EKF estimate); the upstream
+tank drains by gravity through a fixed orifice into a downstream tank,
+which has the real sensor and is the level the PID/MPC controls; the
+downstream tank drains by its own fixed orifice to the sump. There is no
+valve anywhere, one actuator only, matching the real rig exactly.
 
 ## The one rule that shapes everything else
 
@@ -40,7 +47,7 @@ because a Windows box next to it went down.
                  ▼                             ▼                             │
    ┌─────────────────────────┐   ┌─────────────────────────┐                 │
    │  plc-1 (asyncua SERVER) │   │  plc-2, plc-3 ...        │                 │
-   │  tank ODE + PID +       │   │  same pattern            │                 │
+   │  two-tank ODE + PID +   │   │  same pattern            │                 │
    │  interlocks + heartbeat │   │                           │                │
    └────────────▲────────────┘   └────────────▲──────────────┘                │
                  │  OPC UA client (Level.PV, Status.Heartbeat)                │
@@ -61,7 +68,33 @@ Each PLC unit is its own OPC UA server (one process per tank). `dcs/` is an
 OPC UA client to every unit and, at the same time, runs its own small OPC UA
 server so the HMI (or any other client) can read `APC.SolveTime_ms` /
 `APC.Status` and write `APC.Enabled` over the same protocol, without a
-separate side channel. `hmi/` is a plain OPC UA client to both.
+separate side channel. That same server also publishes a per-unit
+`Diagnostics.H1_Estimated` node: the upstream tank's EKF-estimated level,
+which the real rig never exposes either, since it has no sensor. `hmi/` is
+a plain OPC UA client to both.
+
+## Why the MPC actually matters here: preset setpoint cycles
+
+A flat, unchanging target level is not where an MPC earns its keep over a
+plain PID; that's the whole reason `dcs/` can hand a unit a real setpoint
+*trajectory* instead, and get a controller that anticipates a change
+before it happens rather than reacting after the fact. This is ported from
+the original rig's own recipe-playback mechanism
+(`load_cycle_to_mpc`/`tvp_fun` in `src/models/mpc_water_tank_controller.py`),
+same CSV format, same two example profiles.
+
+By default (`dcs/config.py`, no extra configuration needed):
+
+- **Unit 1** tracks [`cycles/step_response.csv`](cycles/step_response.csv):
+  flat, then a step. The MPC starts moving `PID.SP` ahead of the step
+  because it previewed it across its solve horizon, not because the level
+  already drifted off target.
+- **Unit 2** tracks [`cycles/ramp_response.csv`](cycles/ramp_response.csv):
+  a ramp. `PID.SP` moves smoothly along it.
+- **Unit 3** holds a plain constant setpoint, the simple baseline.
+
+See [`demos/demo_e_setpoint_cycles.py`](demos/demo_e_setpoint_cycles.py),
+the demo this project is built to show.
 
 ## Contract-first build
 
@@ -96,7 +129,8 @@ the real `plc/`, see that service's own README:
 
 Scenario scripts are in [`demos/`](demos/README.md): an outflow disturbance
 with APC on vs off, a killed unit degrading gracefully, a large setpoint
-change against a level bound, and scaling to 5 units.
+change against a level bound, scaling to 5 units, and the per-unit preset
+setpoint cycles demo above.
 
 ## What v1 deliberately is not
 
@@ -117,10 +151,11 @@ These are conscious simplifications, not gaps hidden as complete:
   `UNIT_ID`). See `OPEN_QUESTIONS.md` for what scale-friendly handling would
   need; `demos/demo_d_scale_to_5.py` demonstrates 5-unit scale-up against
   `tools/fake_plc.py`, which does not have this limitation.
-- The ported MPC's physical envelope (a small lab rig, roughly 0-0.2 m) does
-  not match the plant-scale tank model in `plc/model.py`. `dcs/` clips
-  `PID.SP` to the controller's own valid range rather than rescaling the
-  ported physics. See `OPEN_QUESTIONS.md` for the full account.
+- The demo cycle CSVs (`cycles/step_response.csv`, `cycles/ramp_response.csv`)
+  are assigned to units 1 and 2 by a small fixed config table in
+  `dcs/config.py`, not an operator-facing recipe manager. tags.yaml has no
+  tag for "which cycle is this unit running", so it cannot be changed from
+  the HMI at runtime, only via env vars at DCS startup.
 
 `OPEN_QUESTIONS.md` has the complete list of contract gaps and integration
 issues found while building this, including a couple of genuine bugs (an
@@ -135,7 +170,8 @@ tags.yaml              frozen OPC UA address space contract
 plantbus/               tags.yaml -> OPC UA server nodes / client subscriptions
 tools/fake_plc.py       dumb OPC UA server for parallel development
 reference/water_mpc/    ported do-mpc + EKF controller core
-plc/                    PLC unit simulator (tank ODE, PID, interlocks, OPC UA server)
+cycles/                 setpoint-cycle CSV loader + the two demo cycle files
+plc/                    PLC unit simulator (two-tank ODE, PID, interlocks, OPC UA server)
 dcs/                    supervisory APC layer (MPC, watchdog, historian, OPC UA client+server)
 hmi/                    operator panel (FastAPI + plain JS, OPC UA client)
 demos/                  scenario scripts

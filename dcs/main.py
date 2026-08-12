@@ -12,21 +12,24 @@ Runs three concurrent things:
 
 No tag exists in tags.yaml for an operator-entered APC target level (only
 PID.SP, which the DCS itself writes, and Level.SP, which is a PLC-reported
-value). See OPEN_QUESTIONS.md: this build uses a fixed per-run target level,
-configurable via DCS_TARGET_LEVEL_M, applied to every unit.
+value). Each unit's setpoint source (a cycle CSV for a real MPC horizon
+preview, or a fixed constant) comes from dcs/config.py's
+unit_setpoint_sources, defaulting to Unit1=step cycle, Unit2=ramp cycle,
+Unit3=constant. See OPEN_QUESTIONS.md.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 
+from cycles.loader import SetpointCycle
 from dcs.config import Config, load_config
 from dcs.controller_wrapper import UnitController
 from dcs.global_server import GlobalServer
@@ -37,27 +40,44 @@ from dcs.watchdog import HeartbeatWatchdog
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("dcs.main")
 
-# Reference model's valid envelope for h2 is 0-20 cm (0-0.2 m), see
-# reference/water_mpc/mpc_core.py H2_MAX. Kept as the default APC target so
-# the ported controller is not asked to track a level outside the physical
-# range it was tuned for. See OPEN_QUESTIONS.md.
-DEFAULT_TARGET_LEVEL_M = 0.15
-
 
 class UnitRuntime:
-    def __init__(self, unit_id: int, client: UnitClient):
+    def __init__(self, unit_id: int, client: UnitClient, setpoint_source):
         self.unit_id = unit_id
         self.client = client
-        self.controller = UnitController(unit_id)
+
+        if isinstance(setpoint_source, str):
+            cycle = SetpointCycle.from_csv(ROOT / setpoint_source)
+            self.constant_target_m: float | None = None
+            logger.info("Unit%d: setpoint source is cycle '%s' (period %.0fs)", unit_id, cycle.name, cycle.period_s)
+        else:
+            cycle = None
+            self.constant_target_m = float(setpoint_source)
+            logger.info("Unit%d: setpoint source is constant target %.3f m", unit_id, self.constant_target_m)
+
+        self.controller = UnitController(unit_id, cycle=cycle)
         self.was_enabled = False
         self.last_solve_time_ms = 0.0
         self.last_converged = True
 
+    def nominal_target_m(self) -> float:
+        """The instantaneous target to pass into step() for bookkeeping.
+        For a cycle-driven unit this is only used for logging/fallback,
+        the horizon preview itself comes from the cycle's own tvp_fun
+        sampling (see controller_wrapper.py / mpc_core.py), not from this
+        single point."""
+        if self.constant_target_m is not None:
+            return self.constant_target_m
+        target = self.controller.current_cycle_target_m
+        return target if target is not None else 0.15
+
 
 async def control_loop(cfg: Config, clients: list[UnitClient], global_server: GlobalServer, historian: Historian) -> None:
     watchdog = HeartbeatWatchdog(cfg.heartbeat_stall_cycles)
-    runtimes = [UnitRuntime(i + 1, clients[i]) for i in range(len(clients))]
-    target_level_m = float(os.environ.get("DCS_TARGET_LEVEL_M", str(DEFAULT_TARGET_LEVEL_M)))
+    runtimes = [
+        UnitRuntime(i + 1, clients[i], cfg.unit_setpoint_sources[i + 1])
+        for i in range(len(clients))
+    ]
     executor = ThreadPoolExecutor(max_workers=max(1, len(clients)), thread_name_prefix="mpc-solve")
 
     loop = asyncio.get_event_loop()
@@ -98,7 +118,7 @@ async def control_loop(cfg: Config, clients: list[UnitClient], global_server: Gl
             step_futures = {}
             for unit_id, (rt, pv, ll_hh_future) in solve_futures.items():
                 ll_m, hh_m = await ll_hh_future
-                fut = loop.run_in_executor(executor, rt.controller.step, target_level_m, pv, hh_m, ll_m)
+                fut = loop.run_in_executor(executor, rt.controller.step, rt.nominal_target_m(), pv, hh_m, ll_m)
                 step_futures[unit_id] = (rt, fut)
 
             deadline = cycle_start + cfg.solve_budget_s
@@ -120,6 +140,9 @@ async def control_loop(cfg: Config, clients: list[UnitClient], global_server: Gl
                     await rt.client.write_pid_sp(result.sp_m)
                 except Exception as exc:
                     logger.warning("Unit%d: failed to write PID.SP (%s)", unit_id, exc)
+
+                h1_estimated_m = float(rt.controller.controller.x_hat[0, 0]) / 100.0
+                await global_server.publish_diagnostics(unit_id, h1_estimated_m)
 
             # Historian: log every reachable unit's full tag set plus the
             # global APC tags, once per cycle.
@@ -155,7 +178,8 @@ async def main() -> None:
     cfg = load_config()
     logger.info("Starting DCS: %d units, cycle=%.1fs, server=%s", len(cfg.plc_endpoints), cfg.cycle_s, cfg.dcs_server_endpoint)
 
-    global_server = GlobalServer(cfg.dcs_server_endpoint)
+    unit_ids = list(range(1, len(cfg.plc_endpoints) + 1))
+    global_server = GlobalServer(cfg.dcs_server_endpoint, unit_ids=unit_ids)
     await global_server.start()
 
     historian = Historian(cfg.historian_db_path)

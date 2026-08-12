@@ -24,9 +24,11 @@ so they do not collide with a manually started fake_plc.py + hmi.
   process per unit) and docker-compose will behave.
 
 - **demo_a_outflow_disturbance.py** -- outflow disturbance, APC on vs APC
-  off. Steps Valve.CMD partway through a run and prints the Level.PV trend.
-  Only the open-loop half is real here (no dcs/ yet); rerun once dcs/ exists
-  with APC.Enabled toggled to see the actual on/off comparison.
+  off. Steps Level.PV directly partway through a run (the real rig has no
+  valve to script a disturbance through, see tags.yaml) and prints the
+  Level.PV trend. Only the open-loop half is real here (no dcs/ yet); rerun
+  once dcs/ exists with APC.Enabled toggled to see the actual on/off
+  comparison.
 
 - **demo_b_lost_unit.py** -- kills unit 2's process ten seconds in (the
   fake-PLC equivalent of `docker stop plc-2`) and polls the HMI's
@@ -45,6 +47,16 @@ so they do not collide with a manually started fake_plc.py + hmi.
   online, no HMI code change. See OPEN_QUESTIONS.md for why this is not the
   same claim as "`docker compose up --scale plc=5` works" -- the compose
   file's fixed three service names do not support that flag directly.
+
+- **demo_e_setpoint_cycles.py** -- the demo this project is actually built
+  to show. Starts three real plc/unit.py processes and a real dcs/main.py,
+  using dcs/config.py's default assignment: Unit 1 tracks
+  cycles/step_response.csv, Unit 2 tracks cycles/ramp_response.csv, Unit 3
+  holds a constant setpoint. Enables APC and prints Level.PV/Level.SP for
+  all three every few seconds. This is the one to screen-record: it is the
+  only demo where the MPC gets a real preview of a future setpoint change
+  across its solve horizon (see reference/water_mpc/mpc_core.py's
+  set_cycle), instead of reacting to today's error after the fact.
 
 ## What was actually run during development
 

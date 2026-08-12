@@ -175,10 +175,17 @@ class WaterTankController:
 
         self._tvp_template_mpc = self.mpc.get_tvp_template()
         self._horizon = self.mpc.settings.n_horizon + 1
+        self._sp_cm = 0.0
+        # Optional setpoint-trajectory source, see set_cycle(). Any object
+        # with a value_at(t_now_s, t_start_s=0.0) -> float (cm) method
+        # works; cycles.loader.SetpointCycle is the one this project ships.
+        # Must be set before set_tvp_fun(), which calls the function
+        # immediately to validate its return type.
+        self._cycle = None
+        self._t_now_s = 0.0
         self.mpc.set_tvp_fun(self._tvp_fun_mpc)
         self.mpc.setup()
 
-        self._sp_cm = 0.0
         x0 = np.array([[1.0], [0.0], [0.0]])  # h1, h2, e_int, in cm
         self.ekf.P0 = np.diag([0.5 ** 2, 1.0 ** 2, 10.0 ** 2])
         self.ekf.x0 = x0
@@ -188,15 +195,38 @@ class WaterTankController:
         self.x_hat = x0.copy()
         self._last_u_cm3s = 0.0
 
+    def set_cycle(self, cycle) -> None:
+        """Give the MPC a real setpoint trajectory to preview across its
+        horizon, instead of a single flat target (ported from the original
+        rig's load_cycle_to_mpc/tvp_fun mechanism). Pass None to go back to
+        a flat scalar setpoint driven by step()'s setpoint_m argument.
+
+        Resets the controller's internal synthetic clock to 0, so the
+        cycle's phase always starts at its own t=0 from this call (matches
+        reset_to_measurement()'s bumpless-transfer restart, see below).
+        """
+        self._cycle = cycle
+        self._t_now_s = 0.0
+
     def _tvp_fun_mpc(self, _t_now):
-        self._tvp_template_mpc["_tvp", :] = [self._sp_cm] * self._horizon
+        if self._cycle is not None:
+            sp_values = [
+                self._cycle.value_at(self._t_now_s + k * self.t_step)
+                for k in range(self._horizon)
+            ]
+            self._tvp_template_mpc["_tvp", :] = sp_values
+        else:
+            self._tvp_template_mpc["_tvp", :] = [self._sp_cm] * self._horizon
         return self._tvp_template_mpc
 
     def reset_to_measurement(self, level_measured_m: float) -> None:
         """Bumpless-transfer entry point: seed the internal state estimate
         with the current plant measurement so re-enabling APC does not
         cause a setpoint jump. Call this once, right before the first
-        step() after APC.Enabled flips to true.
+        step() after APC.Enabled flips to true. Also restarts any set
+        cycle's phase at t=0, the simplest and safest choice for a
+        scripted demo run rather than tracking true wall-clock phase
+        across enable/disable.
         """
         h2_cm = level_measured_m * 100.0
         x0 = np.array([[h2_cm], [h2_cm], [0.0]])
@@ -204,6 +234,7 @@ class WaterTankController:
         self.mpc.x0 = x0.flatten()
         self.mpc.set_initial_guess()
         self.x_hat = x0.copy()
+        self._t_now_s = 0.0
 
     def step(self, setpoint_m: float, level_measured_m: float) -> MPCResult:
         import time
@@ -243,4 +274,5 @@ class WaterTankController:
             pass
 
         self._last_u_cm3s = u_val_cm3s
+        self._t_now_s += self.t_step
         return MPCResult(flow_cm3s=u_val_cm3s, solve_time_ms=solve_time_ms, converged=converged)

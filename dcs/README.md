@@ -1,7 +1,7 @@
 # dcs/ — supervisory APC layer
 
 Writes only `Unit*.PID.SP` (a level target in meters) into the PLC's local
-PID loops. Never writes `Pump.CMD` or `Valve.CMD`. Cascade:
+PID loops. Never writes `Pump.CMD`. Cascade:
 `MPC (dcs/) -> PID.SP -> PLC PID loop -> Pump.CMD -> pump`.
 
 ## OPC UA topology
@@ -46,13 +46,25 @@ all** by `dcs/`: writing it anywhere would break the cascade rule.
 Instead (`dcs/controller_wrapper.py`, `UnitController._extract_predicted_sp_m`):
 after every `step()` call, do-mpc has the freshly re-solved predicted state
 trajectory for the whole horizon in `controller.mpc.data.prediction(('_x',
-'h2'))`. Index 1 along that array (one `t_step` = 1 s ahead, matching the
-DCS's own 1 s control cycle) is the model's own prediction of where the
-controlled level should be after the next second, given the input sequence
-it just optimized. That value (cm -> m) is written as the next `PID.SP`.
-This makes `PID.SP` move along the path the MPC computed, one cycle-sized
-step at a time, instead of jumping straight to the operator's target, while
-never touching an actuator tag.
+'h2'))`. Index `PREDICTION_HORIZON_INDEX` (25, out of a 40-step horizon)
+along that array is the model's own prediction of where the controlled
+level should be that many seconds ahead, given the input sequence it just
+optimized. That value (cm -> m) is written as the next `PID.SP`. This
+makes `PID.SP` move along the path the MPC computed, instead of jumping
+straight to the operator's target, while never touching an actuator tag.
+
+The index is deliberately not 1 ("one t_step ahead"): with this project's
+real (fast, cm-scale) two-tank dynamics, that produces a genuine
+closed-loop instability, not just a slower convergence. See
+`OPEN_QUESTIONS.md` ("closed-loop instability from
+PREDICTION_HORIZON_INDEX=1") for the full diagnosis: a one-second point on
+a slow, multi-second climb is too close to the current measurement for the
+local PID to see a meaningful error, so it applies near-zero pump command
+even while the MPC's own internal plan calls for sustained near-max flow,
+and the real plant drains under gravity while chasing its own barely-moving
+derived setpoint down to the LL interlock. 25 was chosen empirically as
+deep enough into the horizon to give the local PID real corrective
+authority, while staying clear of the horizon's less-certain terminal edge.
 
 `PID.SP` is additionally clipped in `_clip_to_interlock_bounds` to
 `[MODEL_LEVEL_MIN_M, MODEL_LEVEL_MAX_M]` (0 to `H2_MAX/100`, i.e. 0-0.2 m),
@@ -68,6 +80,44 @@ small adaptation (not a rewrite) to run under the installed do-mpc version;
 see `OPEN_QUESTIONS.md` for exactly what and why. The model, objective,
 constraints, and solver settings from `build_model()`/`build_mpc()`/
 `build_ekf()` are untouched.
+
+## Per-unit setpoint source: cycles vs a constant target
+
+`dcs/config.py`'s `unit_setpoint_sources` gives each unit either a
+`cycles.loader.SetpointCycle` (a CSV path) or a plain constant float,
+defaulting to Unit1=`cycles/step_response.csv`, Unit2=`cycles/ramp_response.csv`,
+Unit3=a constant (0.15 m). Override with `DCS_UNIT{n}_CYCLE=<path>` or
+`DCS_UNIT{n}_TARGET_M=<value>` per unit.
+
+For a cycle-driven unit, `UnitController.__init__` calls
+`controller.set_cycle(cycle)`, which is what actually matters here: it
+makes `_tvp_fun_mpc` sample the cycle across the MPC's full solve horizon
+instead of broadcasting one flat value, giving the solver a genuine
+preview of a setpoint change before it happens (ported from the original
+rig's `load_cycle_to_mpc`/`tvp_fun`). The `target_level_m` passed into
+`UnitController.step()` for a cycle-driven unit is only the *current*
+instantaneous cycle value (`UnitController.current_cycle_target_m`), used
+for the wrapper's own bookkeeping/fallback; the actual anticipatory
+behavior comes from the horizon sampling, not from this single point. For
+Unit 3 (no cycle), `step()`'s `target_level_m` behaves exactly as before:
+a flat target the MPC treats as constant across its whole horizon.
+
+`reset_to_measurement()` (bumpless transfer, see below) also resets a
+cycle's phase to t=0, so re-enabling APC always restarts a unit's cycle
+from the beginning rather than resuming at a stale offset.
+
+## Diagnostics.H1_Estimated
+
+The real rig's upstream tank has no sensor, only an EKF estimate computed
+alongside the MPC (`_PortedWaterTankController.x_hat[0, 0]`, already
+computed every `step()`, just not previously surfaced). Since tags.yaml's
+unit contract describes what a PLC actually publishes, and the real PLC
+never publishes this either, it does not belong there. `dcs/main.py`
+publishes it itself, per unit, via `global_server.publish_diagnostics()`,
+as a plain OPC UA variable at `Unit{n}/Diagnostics/H1_Estimated` on the
+DCS's own server (`global_server.py`'s `GlobalServer`, built with a small
+ad hoc helper next to `Global/APC/*`, not routed through
+`plantbus`/tags.yaml). Read-only, for the HMI's display only.
 
 ## Mode handling and bumpless transfer
 
@@ -232,7 +282,8 @@ python -m pytest dcs/tests -q
 | `DCS_HEARTBEAT_STALL_CYCLES` | `5` | Consecutive stalled cycles before a unit is dropped |
 | `DCS_HISTORIAN_DB` | `dcs_historian.sqlite3` | SQLite file path |
 | `DCS_RECONNECT_BACKOFF_S` | `2.0` | OPC UA client reconnect backoff |
-| `DCS_TARGET_LEVEL_M` | `0.15` | Fixed APC target level applied to every unit, see `OPEN_QUESTIONS.md` (no tag exists for a per-unit operator target) |
+| `DCS_UNIT{n}_CYCLE` | Unit1=`cycles/step_response.csv`, Unit2=`cycles/ramp_response.csv` | Per-unit setpoint CSV, real MPC horizon preview (see above) |
+| `DCS_UNIT{n}_TARGET_M` | Unit3=`0.15` | Per-unit constant target, m (no cycle, flat horizon) |
 
 ## Files
 
@@ -240,7 +291,7 @@ python -m pytest dcs/tests -q
 - `opc_client.py` — `UnitClient`: OPC UA client to one PLC unit, subscribes
   `Level.PV`/`Status.Heartbeat`, reconnects on failure, writes `PID.SP`.
 - `global_server.py` — `GlobalServer`: the DCS's own OPC UA server for the
-  `APC.*` global tags.
+  `APC.*` global tags plus the per-unit `Diagnostics.H1_Estimated` node.
 - `controller_wrapper.py` — `UnitController`: wraps the ported MPC, derives
   `PID.SP` from the predicted trajectory, bumpless transfer, hold-last-SP.
 - `watchdog.py` — `HeartbeatWatchdog`.

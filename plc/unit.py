@@ -44,17 +44,14 @@ def _load_config() -> dict:
         unit_id=unit_id,
         port=int(os.environ.get("OPCUA_PORT", "4840")),
         time_scale=_env_float("TIME_SCALE", 1.0),
-        hh=_env_float("LEVEL_HH", 4.0),
-        ll=_env_float("LEVEL_LL", 0.3),
-        local_sp=_env_float("UNIT_LOCAL_SP", 2.0),
-        valve_cmd_pct=_env_float("VALVE_CMD_PCT", 30.0),
-        pid_kp=_env_float("PID_KP", 40.0),
-        pid_ki=_env_float("PID_KI", 5.0),
-        pid_kd=_env_float("PID_KD", 0.0),
-        area_m2=_env_float("TANK_AREA_M2", 2.0),
-        pump_max_flow_m3s=_env_float("PUMP_MAX_FLOW_M3S", 0.05),
-        valve_cv=_env_float("VALVE_CV", 0.03),
-        initial_level_m=_env_float("INITIAL_LEVEL_M", 1.5),
+        hh=_env_float("LEVEL_HH", 0.18),
+        ll=_env_float("LEVEL_LL", 0.01),
+        local_sp=_env_float("UNIT_LOCAL_SP", 0.10),
+        pid_kp=_env_float("PID_KP", 600.0),
+        pid_ki=_env_float("PID_KI", 10.0),
+        pid_kd=_env_float("PID_KD", 100.0),
+        pump_max_flow_cm3s=_env_float("PUMP_MAX_FLOW_CM3S", 17.0),
+        initial_level_m=_env_float("INITIAL_LEVEL_M", 0.05),
         initial_mode=os.environ.get("UNIT_INITIAL_MODE", "CASCADE"),
         reset_file=os.environ.get(
             "RESET_FILE", f"./unit{os.environ.get('UNIT_ID', '1')}.reset"
@@ -80,13 +77,10 @@ async def run(cfg: dict) -> None:
         hh=cfg["hh"],
         ll=cfg["ll"],
         local_sp=cfg["local_sp"],
-        valve_cmd_pct=cfg["valve_cmd_pct"],
         pid_kp=cfg["pid_kp"],
         pid_ki=cfg["pid_ki"],
         pid_kd=cfg["pid_kd"],
-        area_m2=cfg["area_m2"],
-        pump_max_flow_m3s=cfg["pump_max_flow_m3s"],
-        valve_cv=cfg["valve_cv"],
+        pump_max_flow_cm3s=cfg["pump_max_flow_cm3s"],
         initial_level_m=cfg["initial_level_m"],
         initial_mode=cfg["initial_mode"],
     )
@@ -136,8 +130,6 @@ async def run(cfg: dict) -> None:
             await nodes["Pump.CMD"].write_value(out.pump_cmd)
             await nodes["Pump.FB"].write_value(out.pump_fb)
             await nodes["Pump.Running"].write_value(out.pump_running)
-            await nodes["Valve.CMD"].write_value(out.valve_cmd)
-            await nodes["Valve.FB"].write_value(out.valve_fb)
             await nodes["PID.OUT"].write_value(out.pid_out)
             await nodes["PID.Mode"].write_value(out.pid_mode)
             await nodes["Interlock.Trip"].write_value(out.interlock_trip)
