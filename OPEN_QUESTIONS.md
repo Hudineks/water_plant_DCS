@@ -1,8 +1,8 @@
 # Open questions
 
 Things that came up during the build that are worth a decision but did not
-block progress. Each contributor (human or agent) appends here instead of
-silently improvising past a contract gap.
+block progress. Each contributor appends here instead of silently
+improvising past a contract gap.
 
 ## plc/: no writable mode-select tag
 
