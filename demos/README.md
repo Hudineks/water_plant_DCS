@@ -63,12 +63,14 @@ so they do not collide with a manually started fake_plc.py + hmi.
   bottom (Windows taskbar and dead space removed, but the browser's own
   tab/URL bar is kept in frame -- deliberately, since this being a plain
   web page a browser can load is part of the point), played back at 2x
-  speed, 10fps, native 2996x1415 resolution, via ffmpeg's two-pass palette
-  workflow (`palettegen stats_mode=diff` then `paletteuse dither=bayer`,
-  not a direct one-pass conversion) so the readout text stays sharp
-  instead of smearing into dither noise -- 10MB, well under GitHub's 100MB
-  per-file limit. The original full-quality `.mp4` (163MB) is gitignored
-  rather than committed.
+  speed, 10fps, native 3840x1400 resolution (re-recorded at 4K after the
+  first pass; same crop-from-the-bottom-only treatment re-measured against
+  the new frame size), via ffmpeg's two-pass palette workflow (`palettegen
+  stats_mode=diff` then `paletteuse dither=bayer`, not a direct one-pass
+  conversion) so the readout text stays sharp instead of smearing into
+  dither noise -- 15MB, well under GitHub's 100MB per-file limit. The
+  original full-quality `.mp4` (354MB) is gitignored rather than
+  committed.
 
 ## What was actually run during development
 
