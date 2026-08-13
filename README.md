@@ -4,6 +4,16 @@ A simulated water treatment DCS/APC stack: PLC-level regulatory control, an
 OPC UA supervisory MPC layer, and a browser-based operator panel, wired the
 way these systems are actually structured in a real plant.
 
+![Operator panel running the three preset setpoint cycles](demos/demo_e_setpoint_cycles.gif)
+
+Three simulated PLC units, live in a browser at `http://localhost:8080/`
+after `docker compose up`. Each unit tracks its own setpoint cycle (step /
+ramp / manual, switchable live from the CYCLE dropdown) -- Unit 1's flow
+visibly ramps ahead of its step before the level even moves, because the
+MPC previews the change across its solve horizon instead of reacting after
+the fact. See ["Why the MPC actually matters here"](#why-the-mpc-actually-matters-here-preset-setpoint-cycles)
+below for what's actually happening in that recording.
+
 This is the industrial-control counterpart to the original Vodarna project
 (a physical two-tank rig with a do-mpc controller). Here the same MPC core
 is ported into a proper cascade architecture, communicating over OPC UA
@@ -111,16 +121,13 @@ By default (`dcs/config.py`, no extra configuration needed):
 That's just the seeded starting state, not a fixed assignment: each unit's
 setpoint source (`off`/`step`/`ramp`/`manual`) is live-selectable
 afterward from the HMI's per-unit CYCLE dropdown (visible in the
-recording below), which switches `dcs/`'s active cycle for that unit on
-the fly and bumplessly resets its phase -- see `dcs/README.md`'s
-"Per-unit setpoint source" section for how.
+recording at the top of this page), which switches `dcs/`'s active cycle
+for that unit on the fly and bumplessly resets its phase -- see
+`dcs/README.md`'s "Per-unit setpoint source" section for how.
 
 See [`demos/demo_e_setpoint_cycles.py`](demos/demo_e_setpoint_cycles.py),
-the demo this project is built to show, screen-recorded below at 2x speed:
-Unit 1's flow ramping ahead of its step, Unit 2 tracking a ramp, Unit 3
-holding a plain constant target.
-
-![Operator panel running the three preset setpoint cycles](demos/demo_e_setpoint_cycles.gif)
+the demo this project is built to show and the source of the recording at
+the top of this page (2x speed).
 
 ## Contract-first build
 
