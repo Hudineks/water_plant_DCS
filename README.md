@@ -13,9 +13,9 @@ directly.
 Each unit is a faithful copy of the original rig's physics: a pump fills
 an upstream tank, which has no sensor (only an EKF estimate); the upstream
 tank drains by gravity through a fixed orifice into a downstream tank,
-which has the real sensor and is the level the cascade actually targets;
-the downstream tank drains by its own fixed orifice to the sump. There is
-no valve anywhere, one actuator only, matching the real rig exactly.
+which has the real sensor and is the level the PID/MPC controls; the
+downstream tank drains by its own fixed orifice to the sump. There is no
+valve anywhere, one actuator only, matching the real rig exactly.
 
 ## The one rule that shapes everything else
 
@@ -58,8 +58,8 @@ to it went down.
                  ▼                             ▼                             │
    ┌─────────────────────────┐   ┌─────────────────────────┐                 │
    │  plc-1 (asyncua SERVER) │   │  plc-2, plc-3 ...        │                 │
-   │  two-tank ODE + flow    │   │  same pattern            │                 │
-   │  map + interlocks + HB  │   │                           │                │
+   │  two-tank ODE + PID +   │   │  same pattern            │                 │
+   │  interlocks + heartbeat │   │                           │                │
    └────────────▲────────────┘   └────────────▲──────────────┘                │
                  │  OPC UA client (Level.PV, Status.Heartbeat)                │
                  │  OPC UA write (PID.SP flow setpoint, Level.SP target)     │
@@ -167,9 +167,7 @@ setpoint cycles demo above.
 These are conscious simplifications, not gaps hidden as complete:
 
 - No real PLC runtime (no OpenPLC, no Codesys). Each unit is a plain Python
-  process modeling a tank, a static flow-to-command conversion (`PID` in
-  the tag/mode names is a naming holdover, not a closed loop -- see
-  `plc/README.md`), and interlocks.
+  process modeling a tank, a PID, and interlocks.
 - No redundancy. One PLC process per unit, one DCS process, no failover.
 - No OPC UA certificates or encryption. Anonymous auth, `NoSecurity` policy,
   same as most brownfield OT networks running behind a firewall rather than
@@ -206,7 +204,7 @@ plantbus/               tags.yaml -> OPC UA server nodes / client subscriptions
 tools/fake_plc.py       dumb OPC UA server for parallel development
 reference/water_mpc/    ported do-mpc + EKF controller core
 cycles/                 setpoint-cycle CSV loader + the two demo cycle files
-plc/                    PLC unit simulator (two-tank ODE, flow-to-command conversion, interlocks, OPC UA server)
+plc/                    PLC unit simulator (two-tank ODE, PID, interlocks, OPC UA server)
 dcs/                    supervisory APC layer (MPC, watchdog, historian, OPC UA client+server)
 hmi/                    operator panel (FastAPI + plain JS, OPC UA client)
 demos/                  scenario scripts
