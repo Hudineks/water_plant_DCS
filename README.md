@@ -13,9 +13,9 @@ directly.
 Each unit is a faithful copy of the original rig's physics: a pump fills
 an upstream tank, which has no sensor (only an EKF estimate); the upstream
 tank drains by gravity through a fixed orifice into a downstream tank,
-which has the real sensor and is the level the PID/MPC controls; the
-downstream tank drains by its own fixed orifice to the sump. There is no
-valve anywhere, one actuator only, matching the real rig exactly.
+which has the real sensor and is the level the cascade actually targets;
+the downstream tank drains by its own fixed orifice to the sump. There is
+no valve anywhere, one actuator only, matching the real rig exactly.
 
 ## The one rule that shapes everything else
 
@@ -58,8 +58,8 @@ to it went down.
                  ▼                             ▼                             │
    ┌─────────────────────────┐   ┌─────────────────────────┐                 │
    │  plc-1 (asyncua SERVER) │   │  plc-2, plc-3 ...        │                 │
-   │  two-tank ODE + PID +   │   │  same pattern            │                 │
-   │  interlocks + heartbeat │   │                           │                │
+   │  two-tank ODE + flow    │   │  same pattern            │                 │
+   │  map + interlocks + HB  │   │                           │                │
    └────────────▲────────────┘   └────────────▲──────────────┘                │
                  │  OPC UA client (Level.PV, Status.Heartbeat)                │
                  │  OPC UA write (PID.SP flow setpoint, Level.SP target)     │
@@ -69,7 +69,7 @@ to it went down.
                                    │  dcs/  (asyncua CLIENT   │
                                    │  to units, SERVER of its │
                                    │  own for APC.* globals)  │
-                                   │  linear MPC + EKF        │
+                                   │  nonlinear MPC + EKF     │
                                    │  per-unit heartbeat      │
                                    │  watchdog, SQLite log     │
                                    └───────────────────────────┘
@@ -107,6 +107,13 @@ By default (`dcs/config.py`, no extra configuration needed):
   a ramp. `Level.SP` moves smoothly along it and `PID.SP` tracks whatever
   flow the MPC judges will follow that ramp.
 - **Unit 3** holds a plain constant setpoint, the simple baseline.
+
+That's just the seeded starting state, not a fixed assignment: each unit's
+setpoint source (`off`/`step`/`ramp`/`manual`) is live-selectable
+afterward from the HMI's per-unit CYCLE dropdown (visible in the
+recording below), which switches `dcs/`'s active cycle for that unit on
+the fly and bumplessly resets its phase -- see `dcs/README.md`'s
+"Per-unit setpoint source" section for how.
 
 See [`demos/demo_e_setpoint_cycles.py`](demos/demo_e_setpoint_cycles.py),
 the demo this project is built to show, screen-recorded below at 2x speed:
@@ -160,7 +167,9 @@ setpoint cycles demo above.
 These are conscious simplifications, not gaps hidden as complete:
 
 - No real PLC runtime (no OpenPLC, no Codesys). Each unit is a plain Python
-  process modeling a tank, a PID, and interlocks.
+  process modeling a tank, a static flow-to-command conversion (`PID` in
+  the tag/mode names is a naming holdover, not a closed loop -- see
+  `plc/README.md`), and interlocks.
 - No redundancy. One PLC process per unit, one DCS process, no failover.
 - No OPC UA certificates or encryption. Anonymous auth, `NoSecurity` policy,
   same as most brownfield OT networks running behind a firewall rather than
@@ -174,11 +183,14 @@ These are conscious simplifications, not gaps hidden as complete:
   `UNIT_ID`). See `OPEN_QUESTIONS.md` for what scale-friendly handling would
   need; `demos/demo_d_scale_to_5.py` demonstrates 5-unit scale-up against
   `tools/fake_plc.py`, which does not have this limitation.
-- The demo cycle CSVs (`cycles/step_response.csv`, `cycles/ramp_response.csv`)
-  are assigned to units 1 and 2 by a small fixed config table in
-  `dcs/config.py`, not an operator-facing recipe manager. tags.yaml has no
-  tag for "which cycle is this unit running", so it cannot be changed from
-  the HMI at runtime, only via env vars at DCS startup.
+- Only two demo cycle CSVs exist (`cycles/step_response.csv`,
+  `cycles/ramp_response.csv`); there is no operator-facing recipe manager
+  or file upload to add more. Which of the two (or `off`/`manual`) a unit
+  starts on is seeded from a small config table in `dcs/config.py`,
+  env-var overridable at DCS startup -- switching it live is an HMI/DCS
+  feature (see above), not a `tags.yaml` one: `Control.CycleName` and
+  `Control.ManualTargetM` deliberately live on the DCS's own ad hoc OPC UA
+  server, not in the frozen PLC-facing contract.
 
 `OPEN_QUESTIONS.md` has the complete list of contract gaps and integration
 issues found while building this, including a couple of genuine bugs (an
@@ -194,7 +206,7 @@ plantbus/               tags.yaml -> OPC UA server nodes / client subscriptions
 tools/fake_plc.py       dumb OPC UA server for parallel development
 reference/water_mpc/    ported do-mpc + EKF controller core
 cycles/                 setpoint-cycle CSV loader + the two demo cycle files
-plc/                    PLC unit simulator (two-tank ODE, PID, interlocks, OPC UA server)
+plc/                    PLC unit simulator (two-tank ODE, flow-to-command conversion, interlocks, OPC UA server)
 dcs/                    supervisory APC layer (MPC, watchdog, historian, OPC UA client+server)
 hmi/                    operator panel (FastAPI + plain JS, OPC UA client)
 demos/                  scenario scripts
