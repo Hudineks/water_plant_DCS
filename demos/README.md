@@ -59,10 +59,14 @@ so they do not collide with a manually started fake_plc.py + hmi.
   set_cycle), instead of reacting to today's error after the fact. A
   screen recording of the HMI running this scenario is in
   [`demo_e_setpoint_cycles.gif`](demo_e_setpoint_cycles.gif) (also embedded
-  in the top-level [`README.md`](../README.md)); the original full-quality
-  `.mp4` it was converted from (`ffmpeg`, 8fps/800px palette-optimized GIF,
-  1MB vs. the source's 163MB) is gitignored rather than committed, since it
-  is well over GitHub's 100MB per-file limit.
+  in the top-level [`README.md`](../README.md)): cropped to just the panel
+  (browser chrome and taskbar removed), played back at 2x speed, 10fps,
+  native 2996x1272 resolution, via ffmpeg's two-pass palette workflow
+  (`palettegen stats_mode=diff` then `paletteuse dither=bayer`, not a
+  direct one-pass conversion) so the readout text stays sharp instead of
+  smearing into dither noise -- 10MB, well under GitHub's 100MB per-file
+  limit. The original full-quality `.mp4` (163MB) is gitignored rather
+  than committed.
 
 ## What was actually run during development
 

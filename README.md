@@ -109,9 +109,9 @@ By default (`dcs/config.py`, no extra configuration needed):
 - **Unit 3** holds a plain constant setpoint, the simple baseline.
 
 See [`demos/demo_e_setpoint_cycles.py`](demos/demo_e_setpoint_cycles.py),
-the demo this project is built to show, screen-recorded below: Unit 1's flow
-ramping ahead of its step, Unit 2 tracking a ramp, Unit 3 holding a plain
-constant target.
+the demo this project is built to show, screen-recorded below at 2x speed:
+Unit 1's flow ramping ahead of its step, Unit 2 tracking a ramp, Unit 3
+holding a plain constant target.
 
 ![Operator panel running the three preset setpoint cycles](demos/demo_e_setpoint_cycles.gif)
 
