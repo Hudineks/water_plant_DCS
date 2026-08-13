@@ -56,7 +56,13 @@ so they do not collide with a manually started fake_plc.py + hmi.
   all three every few seconds. This is the one to screen-record: it is the
   only demo where the MPC gets a real preview of a future setpoint change
   across its solve horizon (see reference/water_mpc/mpc_core.py's
-  set_cycle), instead of reacting to today's error after the fact.
+  set_cycle), instead of reacting to today's error after the fact. A
+  screen recording of the HMI running this scenario is in
+  [`demo_e_setpoint_cycles.gif`](demo_e_setpoint_cycles.gif) (also embedded
+  in the top-level [`README.md`](../README.md)); the original full-quality
+  `.mp4` it was converted from (`ffmpeg`, 8fps/800px palette-optimized GIF,
+  1MB vs. the source's 163MB) is gitignored rather than committed, since it
+  is well over GitHub's 100MB per-file limit.
 
 ## What was actually run during development
 
