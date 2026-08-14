@@ -1,4 +1,4 @@
-# water_plant_DCS
+# Water Plant DCS
 
 A simulated water treatment DCS/APC stack: PLC-level regulatory control, an
 OPC UA supervisory MPC layer, and a browser-based operator panel, wired the
